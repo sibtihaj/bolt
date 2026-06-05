@@ -1,0 +1,13 @@
+# Binaries
+ibtihaj
+*.exe
+
+# Build artifacts
+dist/
+
+# Go
+*.test
+*.out
+
+# TFE CLI runtime data (user's local state — not committed)
+~/.tfe-cli/
