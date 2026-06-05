@@ -1,6 +1,7 @@
 # Binaries
 bolt
 *.exe
+PLAN.md
 
 # Build artifacts
 dist/
