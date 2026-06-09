@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"strings"
@@ -66,7 +67,9 @@ func CheckPrereqs() error {
 }
 
 // ComposeUp runs docker compose up --detach --wait (idempotent).
-func ComposeUp(d *state.TFEDeployment, creds *credentials.TFECredentials, composePath, waitTimeout string) error {
+// capture, if non-nil, receives a copy of stderr for error classification by
+// the retry layer.
+func ComposeUp(d *state.TFEDeployment, creds *credentials.TFECredentials, composePath, waitTimeout string, capture *bytes.Buffer) error {
 	args := []string{
 		"compose",
 		"--file", composePath,
@@ -74,7 +77,10 @@ func ComposeUp(d *state.TFEDeployment, creds *credentials.TFECredentials, compos
 		"up", "--detach", "--wait",
 		"--wait-timeout", waitTimeout,
 	}
-	return runner.Run("docker", args, runner.RunOptions{Env: dockerEnv(d, creds)})
+	return runner.Run("docker", args, runner.RunOptions{
+		Env:           dockerEnv(d, creds),
+		StderrCapture: capture,
+	})
 }
 
 // ComposeDown runs docker compose down -v (removes containers and volumes).

@@ -1,6 +1,7 @@
 package helm
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -66,7 +67,9 @@ func WriteValues(d *state.TFEDeployment) (string, error) {
 }
 
 // Install runs helm upgrade --install (idempotent). It streams output live.
-func Install(d *state.TFEDeployment, valuesPath, timeout string) error {
+// capture, if non-nil, receives a copy of stderr for error classification by
+// the retry layer.
+func Install(d *state.TFEDeployment, valuesPath, timeout string, capture *bytes.Buffer) error {
 	args := []string{
 		"upgrade", "--install", "tfe",
 		"hashicorp/terraform-enterprise",
@@ -79,7 +82,10 @@ func Install(d *state.TFEDeployment, valuesPath, timeout string) error {
 		args = append(args, "--version", d.HelmChartVersion)
 	}
 	args = append(args, kubeconfigArgs(d)...)
-	return runner.Run("helm", args, runner.RunOptions{Env: kubeconfigEnv(d)})
+	return runner.Run("helm", args, runner.RunOptions{
+		Env:           kubeconfigEnv(d),
+		StderrCapture: capture,
+	})
 }
 
 // Uninstall removes the TFE Helm release from the namespace.

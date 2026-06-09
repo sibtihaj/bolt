@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -9,24 +10,34 @@ import (
 )
 
 type RunOptions struct {
-	Stdout io.Writer
-	Stderr io.Writer
-	Env    []string // appended to os.Environ()
-	Dir    string
+	Stdout        io.Writer
+	Stderr        io.Writer
+	Env           []string      // appended to os.Environ()
+	Dir           string
+	StderrCapture *bytes.Buffer // if set, stderr is tee'd to both Stderr and this buffer
 }
 
 // Run executes name with args, streaming output live. Use for long-running
 // commands (helm install, docker compose up) where progress matters.
 func Run(name string, args []string, opts RunOptions) error {
 	cmd := exec.Command(name, args...)
-	cmd.Stdout = opts.Stdout
-	if cmd.Stdout == nil {
-		cmd.Stdout = os.Stdout
+
+	stdout := opts.Stdout
+	if stdout == nil {
+		stdout = os.Stdout
 	}
-	cmd.Stderr = opts.Stderr
-	if cmd.Stderr == nil {
-		cmd.Stderr = os.Stderr
+	cmd.Stdout = stdout
+
+	effectiveStderr := opts.Stderr
+	if effectiveStderr == nil {
+		effectiveStderr = os.Stderr
 	}
+	if opts.StderrCapture != nil {
+		cmd.Stderr = io.MultiWriter(effectiveStderr, opts.StderrCapture)
+	} else {
+		cmd.Stderr = effectiveStderr
+	}
+
 	if len(opts.Env) > 0 {
 		cmd.Env = append(os.Environ(), opts.Env...)
 	}
@@ -43,10 +54,17 @@ func Run(name string, args []string, opts RunOptions) error {
 // output needs to be parsed (kubectl get pods -o json, helm list -o json).
 func Output(name string, args []string, opts RunOptions) ([]byte, error) {
 	cmd := exec.Command(name, args...)
-	cmd.Stderr = opts.Stderr
-	if cmd.Stderr == nil {
-		cmd.Stderr = os.Stderr
+
+	effectiveStderr := opts.Stderr
+	if effectiveStderr == nil {
+		effectiveStderr = os.Stderr
 	}
+	if opts.StderrCapture != nil {
+		cmd.Stderr = io.MultiWriter(effectiveStderr, opts.StderrCapture)
+	} else {
+		cmd.Stderr = effectiveStderr
+	}
+
 	if len(opts.Env) > 0 {
 		cmd.Env = append(os.Environ(), opts.Env...)
 	}

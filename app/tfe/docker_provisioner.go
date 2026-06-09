@@ -1,16 +1,18 @@
 package tfe
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"time"
 
 	"github.com/sibtihaj/bolt/app/credentials"
+	"github.com/sibtihaj/bolt/app/diagnostics"
 	appDocker "github.com/sibtihaj/bolt/app/docker"
-	appTLS "github.com/sibtihaj/bolt/app/tls"
+	"github.com/sibtihaj/bolt/app/retry"
 	"github.com/sibtihaj/bolt/app/state"
+	appTLS "github.com/sibtihaj/bolt/app/tls"
 )
 
 type DockerProvisioner struct {
@@ -47,7 +49,6 @@ func (p *DockerProvisioner) Deploy(creds *credentials.TFECredentials) error {
 		d.TLSCertPath = certPath
 		d.TLSKeyPath = keyPath
 	} else {
-		// Validate the provided files exist
 		if d.TLSCertPath == "" || d.TLSKeyPath == "" {
 			return fmt.Errorf("--tls-cert and --tls-key are required (or use --generate-tls for a self-signed cert)")
 		}
@@ -65,10 +66,14 @@ func (p *DockerProvisioner) Deploy(creds *credentials.TFECredentials) error {
 		return fmt.Errorf("generate compose: %w", err)
 	}
 
-	// 5. docker compose up (streams live output; credentials injected via env)
+	// 5. docker compose up (streams live output; retried on transient failures)
 	fmt.Println("→ Starting Terraform Enterprise (this may take several minutes)...")
-	waitTimeout := "600" // seconds
-	if err := appDocker.ComposeUp(d, creds, composePath, waitTimeout); err != nil {
+	waitTimeout := "600"
+	projectName := "tfe-" + d.Name
+	if err := retry.Do("docker compose up", retry.DefaultDocker, func(buf *bytes.Buffer) error {
+		return appDocker.ComposeUp(d, creds, composePath, waitTimeout, buf)
+	}); err != nil {
+		diagnostics.DiagnoseDocker(composePath, projectName)
 		return fmt.Errorf("docker compose up: %w", err)
 	}
 
@@ -84,7 +89,6 @@ func (p *DockerProvisioner) Deploy(creds *credentials.TFECredentials) error {
 	_ = appDocker.ComposePs(d)
 	fmt.Printf("\nTFE URL: https://%s\n", d.Hostname)
 	fmt.Println("Note: TFE may take a few minutes to initialize after containers are running.")
-	_ = strconv.Itoa(0) // satisfy import
 	return nil
 }
 
