@@ -1,0 +1,55 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X github.com/sibtihaj/bolt/cmd.version={{.Version}}
+
+archives:
+  - format: tar.gz
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "arm64" }}arm64
+      {{- else }}{{ .Arch }}{{ end }}
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+brews:
+  - name: bolt
+    homepage: "https://github.com/sibtihaj/bolt"
+    description: "Provision Terraform Enterprise on Kubernetes and Docker with a single command"
+    license: "MPL-2.0"
+    commit_author:
+      name: sibtihaj
+      email: syedibtihaj12@gmail.com
+    repository:
+      owner: sibtihaj
+      name: homebrew-tap
+      token: "{{ .Env.PUBLISHER_TOKEN }}"
+    install: |
+      bin.install "bolt"
+    test: |
+      system "#{bin}/bolt", "version"
