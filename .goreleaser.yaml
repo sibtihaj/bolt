@@ -48,7 +48,6 @@ brews:
     repository:
       owner: sibtihaj
       name: homebrew-tap
-      token: "{{ .Env.PUBLISHER_TOKEN }}"
     install: |
       bin.install "bolt"
     test: |
