@@ -12,6 +12,7 @@ A command-line tool for provisioning and managing **Terraform Enterprise (TFE)**
 - [Quick Start](#quick-start)
 - [Operational Modes](#operational-modes)
 - [Credential Resolution](#credential-resolution)
+- [Cloud Provider Credentials](#cloud-provider-credentials)
 - [Commands](#commands)
   - [deploy k8s](#deploy-k8s)
   - [deploy docker](#deploy-docker)
@@ -162,6 +163,85 @@ For every secret, bolt checks in this priority order:
 | `AZURE_SUBSCRIPTION_ID` | Azure subscription ID (AKS) |
 
 **Secrets are never written to disk.** The state file (`~/.bolt/deployments/<name>.json`) stores only non-secret metadata (cluster name, namespace, hostname, etc.).
+
+---
+
+## Cloud Provider Credentials
+
+### How credentials are passed to bolt
+
+bolt does **not** require you to pass cloud provider credentials as flags. Instead, it inherits whatever credentials are already present in your terminal session.
+
+Every subprocess bolt spawns — `aws`, `az`, `gcloud`, `kubectl`, `helm` — runs as a child of your shell and automatically picks up its full environment. If you have valid credentials exported in your terminal before running bolt, they will be used transparently with no extra flags required.
+
+This means any credential mechanism your organisation uses works out of the box:
+
+| Mechanism | How to set it up |
+|---|---|
+| Static keys | `export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...` |
+| STS / temporary credentials | `export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_SESSION_TOKEN=...` |
+| Named profile | `export AWS_PROFILE=my-profile` (reads from `~/.aws/credentials`) |
+| AWS SSO | `aws sso login` then run bolt — the session token is picked up automatically |
+| `aws-vault` / `saml2aws` / corporate credential helper | `aws-vault exec my-profile -- bolt deploy k8s ...` |
+| Azure service principal | `export AZURE_CLIENT_ID=... AZURE_CLIENT_SECRET=... AZURE_TENANT_ID=...` |
+| Azure interactive login | `az login` before running bolt |
+| GCP service account | `export GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa-key.json` |
+| GCP interactive login | `gcloud auth application-default login` before running bolt |
+
+### The pattern for IP-restricted credentials
+
+Many organisations (including corporate AWS environments) restrict credentials to specific IP addresses or VPNs. The recommended workflow is:
+
+1. Connect to your VPN or corporate network
+2. Obtain and export credentials in your terminal using whatever tool your organisation provides
+3. Run `bolt deploy k8s ...` — bolt passes those credentials straight through to the underlying CLIs without inspecting, storing, or re-exporting them
+
+```bash
+# Step 1 — obtain credentials (your organisation's tooling)
+eval $(your-credential-helper --profile tfe-deployer)
+# or: export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_SESSION_TOKEN=...
+
+# Step 2 — bolt uses them automatically, no credential flags needed
+bolt deploy k8s \
+  --name prod \
+  --cluster-type eks \
+  --eks-cluster-name my-eks-cluster \
+  --eks-region us-east-1 \
+  --hostname tfe.example.com \
+  --license "$TFE_LICENSE" \
+  --encryption-password "$TFE_ENCRYPTION_PASSWORD" \
+  --generate-tls
+```
+
+### What you do and do not need to pass
+
+| What | How to provide | Pass as a flag? |
+|---|---|---|
+| AWS / Azure / GCP credentials | `export` in terminal before running bolt | No — inherited automatically |
+| STS session token | `export AWS_SESSION_TOKEN=...` | No — inherited automatically |
+| Cluster name | Non-secret identifier | Yes — `--eks-cluster-name`, `--aks-cluster-name`, `--gke-cluster-name` |
+| Region / zone | Non-secret identifier | Yes — `--eks-region`, `--gke-zone` |
+| TFE license | `export TFE_LICENSE=...` or `--license` flag | Either works |
+| TFE encryption password | `export TFE_ENCRYPTION_PASSWORD=...` or `--encryption-password` | Either works |
+
+The `--aws-profile`, `--azure-client-id`, `--gcp-sa-key` flags are available for scripts or CI pipelines where you want to be explicit, but they are never required when credentials are already in the environment.
+
+### Verifying your credentials before deploying
+
+It is worth confirming your credentials are valid before running a full deploy:
+
+```bash
+# AWS
+aws sts get-caller-identity
+
+# Azure
+az account show
+
+# GCP
+gcloud auth list
+```
+
+If any of these commands succeed, bolt will use the same credentials without any additional configuration.
 
 ---
 
