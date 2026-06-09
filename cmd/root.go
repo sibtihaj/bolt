@@ -16,6 +16,11 @@ var rootCmd = &cobra.Command{
 	Short: "bolt — provision and manage Terraform Enterprise environments",
 	Long: `bolt provisions Terraform Enterprise on Kubernetes (EKS, AKS, GKE, kubeadm)
 and Docker with a single command, and tears them down just as easily.`,
+	// RunE is invoked when bolt is called with no subcommand, launching the
+	// interactive TUI. Flag-based subcommands (bolt deploy k8s ...) still work.
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runInteractive()
+	},
 }
 
 func Execute() {
