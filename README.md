@@ -1,13 +1,17 @@
-# bolt
+# ⚡ bolt
 
-A command-line tool for provisioning and managing **Terraform Enterprise (TFE)** environments with a single command. Spin up a full TFE instance on Kubernetes or Docker, and tear it down just as easily.
+> **Deploy Terraform Enterprise in a bolt** — provision and manage TFE environments on Kubernetes or Docker with a single command.
+
+bolt ships with two modes of operation:
+
+- **Interactive TUI** — run `bolt` with no arguments to launch a full-screen wizard with a gradient logo, guided forms, and a looping menu
+- **Flag mode** — pass flags directly for scripting and CI: `bolt deploy k8s --name prod ...`
 
 ---
 
 ## Table of Contents
 
-- [Overview](#overview)
-- [Prerequisites](#prerequisites)
+- [Interactive TUI](#interactive-tui)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Operational Modes](#operational-modes)
@@ -21,64 +25,146 @@ A command-line tool for provisioning and managing **Terraform Enterprise (TFE)**
   - [list](#list)
   - [output](#output)
   - [version](#version)
+- [Staying Up to Date](#staying-up-to-date)
 - [Project Structure](#project-structure)
 - [Runtime State](#runtime-state)
 - [Config File](#config-file)
 - [Examples](#examples)
-  - [Local dev with Docker (disk mode)](#local-dev-with-docker-disk-mode)
-  - [EKS with external storage](#eks-with-external-storage)
-  - [AKS active-active](#aks-active-active)
-  - [GKE with a pinned chart version](#gke-with-a-pinned-chart-version)
-  - [Self-hosted kubeadm cluster](#self-hosted-kubeadm-cluster)
-  - [Remote Docker host via SSH](#remote-docker-host-via-ssh)
-  - [Dry run](#dry-run)
 
 ---
 
-## Overview
+## Interactive TUI
 
-bolt wraps `helm`, `kubectl`, and `docker compose` to give you a single declarative command for the full TFE lifecycle:
+Run `bolt` with no arguments to launch the interactive interface.
+
+### Startup banner
+
+A two-column banner greets you on launch. The **bolt** logo uses a left-to-right gradient — deep indigo `#4338CA` → violet `#7C3AED` → purple `#A855F7` → fuchsia `#D946EF`. The right panel shows quick-start commands for scripting.
 
 ```
-bolt deploy k8s  --name prod  --cluster-type eks  --hostname tfe.example.com  ...
-bolt status      --name prod
-bolt destroy     --name prod
+╭──────────────────────────────────────────────────────────────────────────────────╮
+│                                                │                                 │
+│   ██████╗   ██████╗  ██╗      ████████╗        │  Getting started                │
+│   ██╔══██╗ ██╔═══██╗ ██║      ╚══██╔══╝        │                                 │
+│   ███████╗ ██║   ██║ ██║         ██║           │  Use the menu below, or pass    │
+│   ██╔══██╗ ██║   ██║ ██║         ██║           │  flags directly for scripting:  │
+│   ██████╔╝ ╚██████╔╝ ███████╗    ██║           │                                 │
+│   ╚═════╝   ╚═════╝  ╚══════╝    ╚═╝           │    bolt deploy k8s  --name prod │
+│                                                │    bolt deploy docker --name dev│
+│   Deploy Terraform Enterprise in a bolt  v0.1.1│    bolt list                    │
+│                                                │    bolt status  --name prod     │
+│                                                │    bolt destroy  --name prod    │
+╰──────────────────────────────────────────────────────────────────────────────────╯
 ```
 
-**Supported deployment targets:**
+### Main menu
 
-| Target | Tool required |
-|---|---|
-| EKS (AWS) | `aws`, `kubectl`, `helm` |
-| AKS (Azure) | `az`, `kubectl`, `helm` |
-| GKE (GCP) | `gcloud`, `kubectl`, `helm` |
-| kubeadm / self-hosted K8s | `kubectl`, `helm` |
-| Docker (local or remote) | `docker` with the Compose plugin |
+After the banner, a persistent menu loops until you choose Exit or press `Ctrl+C`. Purple (`#5C4EE5`) is used for titles and active selectors; green (`#22C55E`) for confirmed selections.
 
----
+```
+  What would you like to do?
 
-## Prerequisites
+  ›  › Deploy Terraform Enterprise
+  ›  ✗ Destroy a deployment
+  ›  ≡ List deployments
+  ›  ◎ Check deployment status
+  ›  ← Exit
+```
 
-**All deployments:**
-- Go 1.22+ (to build from source)
-- A valid **TFE license** from HashiCorp
-- A TLS certificate and private key (or use `--generate-tls` for a self-signed cert in dev)
-- An encryption password
+After every action, bolt pauses and waits for you before returning to the menu — so output from a long deploy is never scrolled away:
 
-**Kubernetes deployments additionally require:**
-- `kubectl` on your PATH
-- `helm` v3+ on your PATH
-- Cloud provider CLI for managed clusters:
-  - EKS → `aws` CLI with credentials configured
-  - AKS → `az` CLI, logged in or with a service principal
-  - GKE → `gcloud` CLI with credentials configured
+```
+  ↵  Press Enter to return to main menu
+  ──────────────────────────────────────────────────────
+```
 
-**Docker deployments additionally require:**
-- `docker` with the Compose plugin (`docker compose version` must succeed)
+### Deploy wizard
+
+Selecting **Deploy** opens a guided form. Groups of fields are shown or hidden based on your earlier answers — only the EKS section appears when you choose EKS, the storage section only appears for `external` and `active-active` modes, etc.
+
+```
+  Cluster type
+  > EKS  — Amazon Elastic Kubernetes Service
+    AKS  — Azure Kubernetes Service
+    GKE  — Google Kubernetes Engine
+    kubeadm  — self-managed cluster
+```
+
+A summary is shown before deployment proceeds, followed by a confirm prompt:
+
+```
+  Deployment summary
+
+  Name:         prod
+  Cluster:      eks (external)
+  Hostname:     tfe.example.com
+  Namespace:    tfe
+  Self-signed:  false
+
+  Proceed with deployment? [Deploy] [Cancel]
+```
+
+### List view
+
+Deployments are shown in a colour-coded table. Status icons use green for running, amber for pending, red for failed:
+
+```
+  NAME               BACKEND   MODE          STATUS       HOSTNAME
+  ──────────────────────────────────────────────────────────────────────
+  prod               k8s       external      ● running    tfe.example.com
+  staging            docker    disk          ◐ pending    tfe.staging.local
+  old-test           k8s       disk          ✗ failed     tfe.test.local
+```
+
+### Status card
+
+Checking status for a single deployment renders a rounded card:
+
+```
+  ╭────────────────────────────────────────────────────╮
+  │                                                    │
+  │   prod                                             │
+  │                                                    │
+  │   Backend:   k8s                                   │
+  │   Mode:      external                              │
+  │   Status:    ● running                             │
+  │   URL:       https://tfe.example.com               │
+  │   Updated:   2026-06-10 14:32:00                   │
+  │                                                    │
+  ╰────────────────────────────────────────────────────╯
+```
+
+### Update notice
+
+When a newer version of bolt is available, an amber notice is displayed when you exit:
+
+```
+  ╭──────────────────────────────────────────────────────────────╮
+  │  ⚡  A new version of bolt is available: v0.2.0              │
+  │                                                              │
+  │  Upgrade:        brew upgrade sibtihaj/tap/bolt              │
+  │  Release notes:  https://github.com/sibtihaj/bolt/releases…  │
+  ╰──────────────────────────────────────────────────────────────╯
+```
 
 ---
 
 ## Installation
+
+### Homebrew (recommended)
+
+```bash
+brew tap sibtihaj/tap
+brew install sibtihaj/tap/bolt
+```
+
+Upgrade to the latest version at any time:
+
+```bash
+brew upgrade sibtihaj/tap/bolt
+```
+
+### Build from source
 
 ```bash
 git clone https://github.com/sibtihaj/bolt.git
@@ -93,8 +179,16 @@ mv bolt /usr/local/bin/bolt
 
 ## Quick Start
 
+### Interactive (recommended for first use)
+
 ```bash
-# Local Docker deployment (self-signed TLS, disk mode — no external services needed)
+bolt          # launches the TUI wizard
+```
+
+### Flag mode (for scripting and CI)
+
+```bash
+# Local Docker deployment — self-signed TLS, disk mode, no cloud account needed
 bolt deploy docker \
   --name local-tfe \
   --hostname localhost \
@@ -102,12 +196,8 @@ bolt deploy docker \
   --license "$TFE_LICENSE" \
   --encryption-password "changeme123"
 
-# Check it's running
+# Check it is running
 bolt status --name local-tfe
-
-# Connect other tools to it
-eval $(bolt output --name local-tfe --format export)
-# → sets TFE_ADDRESS and TFE_HOSTNAME in your shell
 
 # Tear it down
 bolt destroy --name local-tfe
@@ -125,7 +215,7 @@ TFE supports three operational modes, selected with `--mode`:
 | **External** | `external` | External (required) | External S3 (required) | — | Single-instance production |
 | **Active-Active** | `active-active` | External (required) | External S3 (required) | External (required) | HA production |
 
-The default is `disk`. For `external` and `active-active`, bolt requires you to supply database, S3, and (where applicable) Redis connection details via flags or environment variables.
+The default is `disk`. For `external` and `active-active`, bolt requires database, S3, and (where applicable) Redis connection details via flags or environment variables.
 
 ---
 
@@ -162,86 +252,33 @@ For every secret, bolt checks in this priority order:
 | `AZURE_TENANT_ID` | Azure tenant ID (AKS) |
 | `AZURE_SUBSCRIPTION_ID` | Azure subscription ID (AKS) |
 
-**Secrets are never written to disk.** The state file (`~/.bolt/deployments/<name>.json`) stores only non-secret metadata (cluster name, namespace, hostname, etc.).
+**Secrets are never written to disk.** The state file (`~/.bolt/deployments/<name>.json`) stores only non-secret metadata.
 
 ---
 
 ## Cloud Provider Credentials
 
-### How credentials are passed to bolt
-
-bolt does **not** require you to pass cloud provider credentials as flags. Instead, it inherits whatever credentials are already present in your terminal session.
-
-Every subprocess bolt spawns — `aws`, `az`, `gcloud`, `kubectl`, `helm` — runs as a child of your shell and automatically picks up its full environment. If you have valid credentials exported in your terminal before running bolt, they will be used transparently with no extra flags required.
-
-This means any credential mechanism your organisation uses works out of the box:
+bolt does **not** require cloud provider credentials as flags. It inherits whatever credentials are already present in your terminal session — every subprocess (`aws`, `az`, `gcloud`, `kubectl`, `helm`) runs as a child of your shell and picks up its full environment automatically.
 
 | Mechanism | How to set it up |
 |---|---|
 | Static keys | `export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...` |
 | STS / temporary credentials | `export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_SESSION_TOKEN=...` |
-| Named profile | `export AWS_PROFILE=my-profile` (reads from `~/.aws/credentials`) |
-| AWS SSO | `aws sso login` then run bolt — the session token is picked up automatically |
-| `aws-vault` / `saml2aws` / corporate credential helper | `aws-vault exec my-profile -- bolt deploy k8s ...` |
+| Named profile | `export AWS_PROFILE=my-profile` |
+| AWS SSO | `aws sso login` then run bolt |
+| `aws-vault` / `saml2aws` | `aws-vault exec my-profile -- bolt deploy k8s ...` |
 | Azure service principal | `export AZURE_CLIENT_ID=... AZURE_CLIENT_SECRET=... AZURE_TENANT_ID=...` |
 | Azure interactive login | `az login` before running bolt |
 | GCP service account | `export GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa-key.json` |
 | GCP interactive login | `gcloud auth application-default login` before running bolt |
 
-### The pattern for IP-restricted credentials
-
-Many organisations (including corporate AWS environments) restrict credentials to specific IP addresses or VPNs. The recommended workflow is:
-
-1. Connect to your VPN or corporate network
-2. Obtain and export credentials in your terminal using whatever tool your organisation provides
-3. Run `bolt deploy k8s ...` — bolt passes those credentials straight through to the underlying CLIs without inspecting, storing, or re-exporting them
+**Verify credentials before deploying:**
 
 ```bash
-# Step 1 — obtain credentials (your organisation's tooling)
-eval $(your-credential-helper --profile tfe-deployer)
-# or: export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_SESSION_TOKEN=...
-
-# Step 2 — bolt uses them automatically, no credential flags needed
-bolt deploy k8s \
-  --name prod \
-  --cluster-type eks \
-  --eks-cluster-name my-eks-cluster \
-  --eks-region us-east-1 \
-  --hostname tfe.example.com \
-  --license "$TFE_LICENSE" \
-  --encryption-password "$TFE_ENCRYPTION_PASSWORD" \
-  --generate-tls
+aws sts get-caller-identity   # AWS
+az account show               # Azure
+gcloud auth list              # GCP
 ```
-
-### What you do and do not need to pass
-
-| What | How to provide | Pass as a flag? |
-|---|---|---|
-| AWS / Azure / GCP credentials | `export` in terminal before running bolt | No — inherited automatically |
-| STS session token | `export AWS_SESSION_TOKEN=...` | No — inherited automatically |
-| Cluster name | Non-secret identifier | Yes — `--eks-cluster-name`, `--aks-cluster-name`, `--gke-cluster-name` |
-| Region / zone | Non-secret identifier | Yes — `--eks-region`, `--gke-zone` |
-| TFE license | `export TFE_LICENSE=...` or `--license` flag | Either works |
-| TFE encryption password | `export TFE_ENCRYPTION_PASSWORD=...` or `--encryption-password` | Either works |
-
-The `--aws-profile`, `--azure-client-id`, `--gcp-sa-key` flags are available for scripts or CI pipelines where you want to be explicit, but they are never required when credentials are already in the environment.
-
-### Verifying your credentials before deploying
-
-It is worth confirming your credentials are valid before running a full deploy:
-
-```bash
-# AWS
-aws sts get-caller-identity
-
-# Azure
-az account show
-
-# GCP
-gcloud auth list
-```
-
-If any of these commands succeed, bolt will use the same credentials without any additional configuration.
 
 ---
 
@@ -257,37 +294,36 @@ bolt deploy k8s [flags]
 
 bolt automatically:
 1. Checks that `kubectl` and `helm` are available
-2. Configures kubeconfig for the cloud provider (EKS/AKS/GKE), or uses the provided `--kubeconfig` directly
-3. Creates the namespace
-4. Creates Kubernetes secrets (`tfe-secrets`, `tfe-tls`, `tfe-storage`)
-5. Generates `~/.bolt/helm/<name>/values.yaml` from the operational mode template
-6. Adds the HashiCorp Helm repo and runs `helm upgrade --install`
-7. Waits for pods to become ready, then prints a health summary
+2. Configures kubeconfig for the cloud provider (EKS/AKS/GKE), or uses `--kubeconfig` directly
+3. Creates the namespace and Kubernetes secrets (`tfe-secrets`, `tfe-tls`, `tfe-storage`)
+4. Generates `~/.bolt/helm/<name>/values.yaml` from the operational mode template
+5. Adds the HashiCorp Helm repo and runs `helm upgrade --install`
+6. Waits for pods to become ready, then prints a health summary
 
 **Required flags:**
 
 | Flag | Description |
 |---|---|
-| `-n, --name` | Logical deployment name (used for state tracking) |
+| `-n, --name` | Logical deployment name |
 | `--cluster-type` | `eks`, `aks`, `gke`, or `kubeadm` |
-| `--hostname` | TFE fully-qualified domain name (e.g. `tfe.example.com`) |
+| `--hostname` | TFE fully-qualified domain name |
 
 **Core flags:**
 
 | Flag | Default | Description |
 |---|---|---|
 | `--mode` | `disk` | Operational mode: `disk`, `external`, `active-active` |
-| `--namespace` | `tfe` | Kubernetes namespace to deploy into |
+| `--namespace` | `tfe` | Kubernetes namespace |
 | `--kubeconfig` | `~/.kube/config` | Path to kubeconfig file |
 | `--image-tag` | `latest` | TFE container image tag |
 | `--helm-chart-version` | latest | Pin a specific Helm chart version |
 | `--wait-timeout` | `10m` | Helm `--wait` timeout |
-| `--generate-tls` | false | Generate a self-signed certificate (dev/testing only) |
+| `--generate-tls` | false | Generate a self-signed certificate (dev only) |
 | `--dry-run` | false | Render `values.yaml` and exit without deploying |
 
 **Credential flags:**
 
-| Flag | Env var fallback | Description |
+| Flag | Env var | Description |
 |---|---|---|
 | `--license` | `TFE_LICENSE` | TFE license string |
 | `--license-path` | `TFE_LICENSE_PATH` | Path to TFE license file |
@@ -301,33 +337,11 @@ bolt automatically:
 | `--s3-secret-key` | `TFE_S3_SECRET_ACCESS_KEY` | S3 secret access key |
 | `--redis-url` | `TFE_REDIS_URL` | Redis URL (`active-active` only) |
 
-**Cloud provider flags (EKS):**
+**Cloud provider flags (EKS):** `--eks-cluster-name`, `--eks-region`, `--aws-profile`
 
-| Flag | Description |
-|---|---|
-| `--eks-cluster-name` | EKS cluster name |
-| `--eks-region` | EKS cluster AWS region |
-| `--aws-profile` | AWS credentials profile name |
+**Cloud provider flags (AKS):** `--aks-cluster-name`, `--aks-resource-group`, `--azure-client-id`, `--azure-client-secret`, `--azure-tenant-id`, `--azure-subscription-id`
 
-**Cloud provider flags (AKS):**
-
-| Flag | Description |
-|---|---|
-| `--aks-cluster-name` | AKS cluster name |
-| `--aks-resource-group` | Azure resource group |
-| `--azure-client-id` | Service principal client ID |
-| `--azure-client-secret` | Service principal client secret |
-| `--azure-tenant-id` | Azure tenant ID |
-| `--azure-subscription-id` | Azure subscription ID |
-
-**Cloud provider flags (GKE):**
-
-| Flag | Description |
-|---|---|
-| `--gke-cluster-name` | GKE cluster name |
-| `--gke-zone` | GKE cluster zone |
-| `--gke-project` | GCP project ID |
-| `--gcp-sa-key` | Path to GCP service account key JSON |
+**Cloud provider flags (GKE):** `--gke-cluster-name`, `--gke-zone`, `--gke-project`, `--gcp-sa-key`
 
 ---
 
@@ -339,41 +353,22 @@ Deploy TFE using Docker Compose on a local or remote Docker host.
 bolt deploy docker [flags]
 ```
 
-bolt automatically:
-1. Checks that `docker` and the Compose plugin are available
-2. Creates the data directory (disk mode only)
-3. Generates or validates TLS certificates
-4. Writes `~/.bolt/compose/<name>/docker-compose.yaml` (secrets stay as `${VAR}` references — never in the file)
-5. Runs `docker compose up --detach --wait`
-6. Prints a container status summary
-
-**Required flags:**
-
-| Flag | Description |
-|---|---|
-| `-n, --name` | Logical deployment name |
-| `--hostname` | TFE fully-qualified domain name |
+**Required flags:** `-n, --name`, `--hostname`
 
 **Core flags:**
 
 | Flag | Default | Description |
 |---|---|---|
-| `--mode` | `disk` | Operational mode: `disk`, `external`, `active-active` |
+| `--mode` | `disk` | Operational mode |
 | `--image-tag` | `latest` | TFE container image tag |
 | `--data-dir` | `~/.bolt/data/<name>` | Host path for disk-mode data volume |
 | `--wait-timeout` | `600` | `docker compose --wait-timeout` in seconds |
-| `--generate-tls` | false | Generate a self-signed certificate (dev/testing only) |
-| `--dry-run` | false | Render `docker-compose.yaml` and exit without starting containers |
+| `--generate-tls` | false | Generate a self-signed certificate |
+| `--dry-run` | false | Render compose file and exit |
 
-**Remote Docker flags:**
+**Remote Docker flags:** `--ssh-host`, `--ssh-user`, `--ssh-key`
 
-| Flag | Description |
-|---|---|
-| `--ssh-host` | Deploy to a remote Docker host (e.g. `192.168.1.10`) |
-| `--ssh-user` | SSH username for the remote host (default: current user) |
-| `--ssh-key` | Path to SSH private key for the remote host |
-
-**Credential flags** — same as `deploy k8s` minus the cloud-provider flags.
+**Credential flags** — same as `deploy k8s` minus cloud-provider flags.
 
 ---
 
@@ -385,30 +380,20 @@ Tear down a TFE deployment and remove its state record.
 bolt destroy --name <name> [--force]
 ```
 
-- **Kubernetes:** runs `helm uninstall`, then deletes the namespace
-- **Docker:** runs `docker compose down -v` (removes containers and volumes)
-- State file at `~/.bolt/deployments/<name>.json` is deleted on success
-
-| Flag | Default | Description |
-|---|---|---|
-| `-n, --name` | — | Deployment name (required) |
-| `-f, --force` | false | Continue destroying even if individual steps error |
+- **Kubernetes:** `helm uninstall` then `kubectl delete namespace`
+- **Docker:** `docker compose down -v`
 
 ---
 
 ### status
 
-Show the current status of a deployment and live resource state.
+Show stored metadata and live resource state for a deployment.
 
 ```
 bolt status --name <name>
 ```
 
-Prints stored metadata (backend, mode, hostname, timestamps) then calls the underlying backend to show live resource state — `kubectl get pods` for Kubernetes or `docker compose ps` for Docker.
-
-| Flag | Description |
-|---|---|
-| `-n, --name` | Deployment name (required) |
+Prints the deployment card then calls `kubectl get pods` (K8s) or `docker compose ps` (Docker).
 
 ---
 
@@ -420,57 +405,82 @@ List all deployments known to bolt.
 bolt list [--output table|json]
 ```
 
-| Flag | Default | Description |
-|---|---|---|
-| `-o, --output` | `table` | Output format: `table` or `json` |
-
-**Table output example:**
+**Table output:**
 ```
-NAME        BACKEND   MODE       STATUS    HOSTNAME             CREATED
-local-tfe   docker    disk       running   localhost            2026-06-05 14:30
-prod-k8s    k8s       external   running   tfe.example.com      2026-06-05 16:00
+  NAME               BACKEND   MODE          STATUS       HOSTNAME
+  ──────────────────────────────────────────────────────────────────────
+  prod               k8s       external      ● running    tfe.example.com
+  local-tfe          docker    disk          ● running    localhost
 ```
 
 ---
 
 ### output
 
-Print environment variables for connecting tools to a deployment.
+Print environment variables for connecting other tools to a deployment.
 
 ```
 bolt output --name <name> [--format export|json]
 ```
 
-| Flag | Default | Description |
-|---|---|---|
-| `-n, --name` | — | Deployment name (required) |
-| `--format` | `export` | `export` (shell eval) or `json` |
-
-**Usage:**
 ```bash
-# Source into your shell
-eval $(bolt output --name prod-k8s --format export)
-
-# JSON for scripting
-bolt output --name prod-k8s --format json
+eval $(bolt output --name prod --format export)
+# → sets TFE_ADDRESS and TFE_HOSTNAME in your shell
 ```
-
-**Output variables:**
-
-| Variable | Value |
-|---|---|
-| `TFE_ADDRESS` | `https://<hostname>` |
-| `TFE_HOSTNAME` | The TFE hostname |
 
 ---
 
 ### version
 
-Print the bolt version.
+Print the current bolt version and check for updates.
 
 ```
 bolt version
 ```
+
+**Example output (up to date):**
+```
+bolt v0.1.1
+✓  You are up to date.
+```
+
+**Example output (update available):**
+```
+bolt v0.1.1
+
+  ╭──────────────────────────────────────────────────────────────╮
+  │  A newer version is available: v0.2.0                        │
+  │                                                              │
+  │  Run: brew upgrade sibtihaj/tap/bolt                         │
+  │  Release notes: https://github.com/sibtihaj/bolt/releases/…  │
+  ╰──────────────────────────────────────────────────────────────╯
+```
+
+---
+
+## Staying Up to Date
+
+bolt checks for new releases in the background every time the TUI is opened. When a newer version is found, an amber notice is shown when you exit.
+
+To check manually at any time:
+
+```bash
+bolt version
+```
+
+To upgrade:
+
+```bash
+brew upgrade sibtihaj/tap/bolt
+```
+
+To disable the update check (useful in CI pipelines):
+
+```bash
+export BOLT_NO_UPDATE_CHECK=1
+```
+
+Release notes for every version are published automatically at [github.com/sibtihaj/bolt/releases](https://github.com/sibtihaj/bolt/releases).
 
 ---
 
@@ -478,20 +488,21 @@ bolt version
 
 ```
 bolt/
-├── main.go                        # Entry point — calls cmd.Execute()
-├── version.go                     # Version string (set at build time)
+├── main.go
 ├── go.mod / go.sum
 │
-├── cmd/                           # CLI layer — Cobra commands
-│   ├── root.go                    # Root command, --config flag, config loading
+├── cmd/                           # CLI layer — Cobra commands + TUI
+│   ├── root.go                    # Root command — launches TUI when called with no args
+│   ├── interactive.go             # TUI: banner, main menu loop, list/status/destroy views
+│   ├── interactive_deploy.go      # TUI: guided deploy wizards (K8s + Docker)
 │   ├── deploy.go                  # 'deploy' parent command
-│   ├── deploy_k8s.go              # 'deploy k8s' — flags and RunE wiring
-│   ├── deploy_docker.go           # 'deploy docker' — flags and RunE wiring
+│   ├── deploy_k8s.go              # 'deploy k8s' flags and RunE
+│   ├── deploy_docker.go           # 'deploy docker' flags and RunE
 │   ├── destroy.go
 │   ├── list.go
 │   ├── status.go
 │   ├── output.go
-│   └── version.go
+│   └── version.go                 # 'bolt version' — prints version + checks for updates
 │
 ├── internal/
 │   └── exec/
@@ -499,42 +510,54 @@ bolt/
 │
 └── app/                           # Business logic
     ├── config/
-    │   ├── types.go               # TFEConfig struct
-    │   └── config.go              # Load / Save config file
+    │   ├── types.go
+    │   └── config.go
     │
     ├── state/
     │   ├── types.go               # TFEDeployment, Backend, OperationalMode, ClusterType
     │   └── state.go               # Load / Save (atomic) / Delete / List
     │
     ├── credentials/
-    │   └── resolver.go            # Resolve() — flag → env → config priority chain
+    │   └── resolver.go            # flag → env → config priority chain
+    │
+    ├── update/
+    │   └── check.go               # Background GitHub release check; respects BOLT_NO_UPDATE_CHECK
     │
     ├── tls/
-    │   └── selfsigned.go          # GenerateSelfSignedCert()
+    │   └── selfsigned.go
     │
     ├── helm/
-    │   ├── helm.go                # RepoAdd / RepoUpdate / Install / Uninstall
-    │   ├── values.go              # BuildValues() — renders values.yaml via text/template
+    │   ├── helm.go
+    │   ├── values.go
     │   └── templates/
     │       ├── values-disk.yaml.tmpl
     │       ├── values-external.yaml.tmpl
     │       └── values-active-active.yaml.tmpl
     │
     ├── kubectl/
-    │   └── kubectl.go             # CreateNamespace / UpsertSecret / UpsertTLSSecret / GetPods
+    │   └── kubectl.go
     │
     ├── docker/
-    │   ├── docker.go              # ComposeUp / ComposeDown / ComposePs
-    │   ├── compose.go             # BuildCompose() / WriteCompose()
+    │   ├── docker.go
+    │   ├── compose.go
     │   └── templates/
     │       ├── compose-disk.yaml.tmpl
     │       ├── compose-external.yaml.tmpl
     │       └── compose-active-active.yaml.tmpl
     │
     ├── cloud/
-    │   ├── eks.go                 # ConfigureEKSKubeconfig  (aws eks update-kubeconfig)
-    │   ├── aks.go                 # ConfigureAKSKubeconfig  (az aks get-credentials)
-    │   └── gke.go                 # ConfigureGKEKubeconfig  (gcloud container clusters get-credentials)
+    │   ├── eks.go
+    │   ├── aks.go
+    │   └── gke.go
+    │
+    ├── retry/
+    │   ├── retry.go               # Exponential backoff with equal jitter
+    │   └── classifier.go          # Fatal vs retryable vs throttle error classification
+    │
+    ├── diagnostics/
+    │   ├── k8s.go                 # kubectl warning events, pod describe, helm history
+    │   ├── docker.go              # compose ps + logs on failure
+    │   └── cloud.go               # CloudTrail / Azure Activity Log / GCP logging
     │
     └── tfe/
         ├── provisioner.go         # Provisioner interface + NewProvisioner factory
@@ -550,68 +573,35 @@ bolt stores all deployment state under `~/.bolt/`:
 
 ```
 ~/.bolt/
-├── config.yaml                    # Optional global defaults
+├── config.yaml
 ├── deployments/
-│   └── <name>.json                # One file per deployment (no secrets stored here)
+│   └── <name>.json                # Deployment metadata — no secrets stored here
 ├── helm/
-│   └── <name>/
-│       └── values.yaml            # Generated Helm values for the last deploy
+│   └── <name>/values.yaml
 ├── compose/
-│   └── <name>/
-│       └── docker-compose.yaml    # Generated compose file for the last deploy
+│   └── <name>/docker-compose.yaml # Secrets remain as ${VAR} references
 ├── tls/
-│   └── <name>/
-│       ├── tfe.crt                # Auto-generated cert (only when --generate-tls)
-│       └── tfe.key
+│   └── <name>/tfe.crt, tfe.key
 └── data/
-    └── <name>/                    # Docker disk-mode bind-mount data
+    └── <name>/                    # Docker disk-mode bind-mount
 ```
 
-**State file fields** (`~/.bolt/deployments/<name>.json`):
-
-```json
-{
-  "name": "local-tfe",
-  "backend": "docker",
-  "mode": "disk",
-  "hostname": "localhost",
-  "image_tag": "latest",
-  "tls_cert_path": "/Users/you/.bolt/tls/local-tfe/tfe.crt",
-  "tls_key_path": "/Users/you/.bolt/tls/local-tfe/tfe.key",
-  "self_signed_tls": true,
-  "data_dir": "/Users/you/.bolt/data/local-tfe",
-  "status": "running",
-  "created_at": "2026-06-05T14:30:00Z",
-  "updated_at": "2026-06-05T14:45:00Z"
-}
-```
-
-Secrets (license, encryption password, database URLs, S3 keys) are **never written to this file**.
+Secrets (license, encryption password, database URLs, S3 keys) are **never written to any file on disk**.
 
 ---
 
 ## Config File
 
-`~/.bolt/config.yaml` is optional. It provides defaults for values you use in every deployment so you don't have to repeat them on every command.
+`~/.bolt/config.yaml` provides defaults so you don't repeat common values on every command:
 
 ```yaml
 # ~/.bolt/config.yaml
-
-# Path to your TFE license file
 default_license_path: /home/you/licenses/tfe.hclic
-
-# Default encryption password (use a secrets manager for production)
 default_encryption_password: ""
-
-# Default image tag to use when --image-tag is not provided
 default_image_tag: "v202501-1"
-
-# Arbitrary additional defaults
-defaults:
-  some_key: some_value
 ```
 
-The config file path can be overridden globally:
+Override the config file path globally:
 
 ```bash
 bolt --config /path/to/custom-config.yaml deploy docker ...
@@ -623,8 +613,6 @@ bolt --config /path/to/custom-config.yaml deploy docker ...
 
 ### Local dev with Docker (disk mode)
 
-The simplest possible deployment — everything embedded, no cloud accounts needed.
-
 ```bash
 bolt deploy docker \
   --name dev \
@@ -632,16 +620,11 @@ bolt deploy docker \
   --generate-tls \
   --license "$TFE_LICENSE" \
   --encryption-password "dev-password-123"
-```
 
-After deployment:
-```bash
 bolt status --name dev
-curl -k https://localhost/_health_check   # should return 200
+curl -k https://localhost/_health_check
 bolt destroy --name dev
 ```
-
----
 
 ### EKS with external storage
 
@@ -652,22 +635,17 @@ bolt deploy k8s \
   --hostname tfe.internal.example.com \
   --eks-cluster-name my-eks-cluster \
   --eks-region us-east-1 \
-  --aws-profile my-aws-profile \
   --mode external \
   --license "$TFE_LICENSE" \
   --encryption-password "$TFE_ENCRYPTION_PASSWORD" \
   --tls-cert ./certs/tfe.crt \
   --tls-key  ./certs/tfe.key \
-  --db-url "postgres://tfe:password@mydb.us-east-1.rds.amazonaws.com:5432/tfe" \
+  --db-url "postgres://tfe:pass@mydb.rds.amazonaws.com:5432/tfe" \
   --s3-bucket my-tfe-bucket \
   --s3-region us-east-1 \
   --s3-access-key "$AWS_ACCESS_KEY_ID" \
-  --s3-secret-key "$AWS_SECRET_ACCESS_KEY" \
-  --namespace tfe \
-  --wait-timeout 15m
+  --s3-secret-key "$AWS_SECRET_ACCESS_KEY"
 ```
-
----
 
 ### AKS active-active
 
@@ -678,10 +656,6 @@ bolt deploy k8s \
   --hostname tfe.example.com \
   --aks-cluster-name my-aks-cluster \
   --aks-resource-group my-resource-group \
-  --azure-client-id "$AZURE_CLIENT_ID" \
-  --azure-client-secret "$AZURE_CLIENT_SECRET" \
-  --azure-tenant-id "$AZURE_TENANT_ID" \
-  --azure-subscription-id "$AZURE_SUBSCRIPTION_ID" \
   --mode active-active \
   --license "$TFE_LICENSE" \
   --encryption-password "$TFE_ENCRYPTION_PASSWORD" \
@@ -692,11 +666,8 @@ bolt deploy k8s \
   --s3-region eastus \
   --s3-access-key "$STORAGE_ACCESS_KEY" \
   --s3-secret-key "$STORAGE_SECRET_KEY" \
-  --redis-url "$TFE_REDIS_URL" \
-  --wait-timeout 20m
+  --redis-url "$TFE_REDIS_URL"
 ```
-
----
 
 ### GKE with a pinned chart version
 
@@ -708,7 +679,6 @@ bolt deploy k8s \
   --gke-cluster-name my-gke-cluster \
   --gke-zone us-central1-a \
   --gke-project my-gcp-project \
-  --gcp-sa-key ./sa-key.json \
   --mode external \
   --license "$TFE_LICENSE" \
   --encryption-password "$TFE_ENCRYPTION_PASSWORD" \
@@ -722,11 +692,7 @@ bolt deploy k8s \
   --helm-chart-version 1.3.0
 ```
 
----
-
 ### Self-hosted kubeadm cluster
-
-When `--cluster-type kubeadm` is used, bolt skips cloud kubeconfig setup and uses your local kubeconfig directly.
 
 ```bash
 bolt deploy k8s \
@@ -738,8 +704,6 @@ bolt deploy k8s \
   --license "$TFE_LICENSE" \
   --encryption-password "homelab-secret"
 ```
-
----
 
 ### Remote Docker host via SSH
 
@@ -755,38 +719,24 @@ bolt deploy docker \
   --encryption-password "$TFE_ENCRYPTION_PASSWORD"
 ```
 
----
-
 ### Dry run
-
-Preview the generated Helm values or Docker Compose file without deploying anything.
 
 ```bash
 # Kubernetes — prints rendered values.yaml
-bolt deploy k8s \
-  --name smoke \
-  --cluster-type kubeadm \
-  --hostname tfe.example.com \
-  --license fake \
-  --encryption-password fake \
-  --generate-tls \
-  --dry-run
+bolt deploy k8s --name smoke --cluster-type kubeadm \
+  --hostname tfe.example.com --license fake --encryption-password fake \
+  --generate-tls --dry-run
 
 # Docker — prints rendered docker-compose.yaml
-bolt deploy docker \
-  --name smoke \
-  --hostname localhost \
-  --license fake \
-  --encryption-password fake \
-  --generate-tls \
-  --dry-run
+bolt deploy docker --name smoke --hostname localhost \
+  --license fake --encryption-password fake --generate-tls --dry-run
 ```
 
 ---
 
 ## Security Notes
 
-- `--generate-tls` produces a **self-signed certificate** that is not trusted by browsers or external systems. Use it only for local development and testing.
-- Provide production TLS certificates signed by a public or internal CA using `--tls-cert` / `--tls-key`.
-- Secrets (license, passwords, keys) are resolved in memory only — they are never written to the state files or generated YAML files on disk. Docker Compose files use `${VAR}` shell-variable references; actual values are injected via the process environment at runtime.
-- The state directory (`~/.bolt/`) is created with `0700` permissions; all state files and generated configs use `0600`.
+- `--generate-tls` produces a **self-signed certificate** not trusted by browsers or external systems. Use it only for local dev and testing.
+- Provide production TLS certificates signed by a public or internal CA via `--tls-cert` / `--tls-key`.
+- Secrets (license, passwords, keys) are resolved in memory only — never written to state files or generated YAML on disk. Docker Compose files use `${VAR}` references; values are injected via the process environment at runtime.
+- The state directory (`~/.bolt/`) is created with `0700` permissions; all state files use `0600`.
