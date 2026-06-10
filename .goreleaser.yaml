@@ -40,7 +40,7 @@ changelog:
 brews:
   - name: bolt
     homepage: "https://github.com/sibtihaj/bolt"
-    description: "Provision Terraform Enterprise on Kubernetes and Docker with a single command"
+    description: "Deploy Terraform Enterprise in a bolt — K8s and Docker, any cloud"
     license: "MPL-2.0"
     commit_author:
       name: sibtihaj

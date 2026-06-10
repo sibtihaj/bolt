@@ -143,7 +143,7 @@ func printBanner() {
 	logoLines := buildLogoLines()
 	leftLines := append(logoLines,
 		"",
-		taglineStyle.Render("Terraform Enterprise Provisioner")+"  "+badgeStyle.Render(" v"+version+" "),
+		taglineStyle.Render("Deploy Terraform Enterprise in a bolt")+"  "+badgeStyle.Render(" v"+version+" "),
 	)
 	leftPanel := lipgloss.NewStyle().
 		Padding(1, 3).
