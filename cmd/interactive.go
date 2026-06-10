@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/sibtihaj/bolt/app/state"
 	"github.com/sibtihaj/bolt/app/tfe"
+	"github.com/sibtihaj/bolt/app/update"
 )
 
 // ── ASCII block art for each letter of "bolt" ─────────────────────────────────
@@ -186,7 +187,31 @@ func printBanner() {
 
 // ── Main loop ─────────────────────────────────────────────────────────────────
 
+// updateNoticStyle is the box shown when a newer bolt version is available.
+var updateNoticeStyle = lipgloss.NewStyle().
+	Border(lipgloss.RoundedBorder()).
+	BorderForeground(amberColor).
+	Padding(0, 2)
+
+func showUpdateNotice(rel *update.Release) {
+	line1 := lipgloss.NewStyle().Bold(true).Foreground(amberColor).Render(
+		"⚡  A new version of bolt is available: v" + rel.Version,
+	)
+	line2 := labelStyle.Render("Upgrade:  ") +
+		tcStyle.Render("brew upgrade sibtihaj/tap/bolt")
+	line3 := labelStyle.Render("Release notes:  ") +
+		lipgloss.NewStyle().Foreground(lilacColor).Render(rel.URL)
+	fmt.Println(updateNoticeStyle.Render(
+		lipgloss.JoinVertical(lipgloss.Left, line1, "", line2, line3),
+	))
+	fmt.Println()
+}
+
 func runInteractive() error {
+	// Start update check in background so it never delays startup.
+	updateCh := make(chan *update.Release, 1)
+	go func() { updateCh <- update.Check(version) }()
+
 	printBanner()
 
 	for {
@@ -209,6 +234,14 @@ func runInteractive() error {
 		if errors.Is(err, huh.ErrUserAborted) || action == "exit" {
 			fmt.Println("\n" + hintStyle.Render("  Goodbye!") + "  " +
 				lipgloss.NewStyle().Foreground(lipgloss.Color("#D946EF")).Render("⚡") + "\n")
+			// Show update notice if a newer version was found during this session.
+			select {
+			case rel := <-updateCh:
+				if rel != nil {
+					showUpdateNotice(rel)
+				}
+			default:
+			}
 			return nil
 		}
 		if err != nil {
