@@ -13,6 +13,15 @@ import (
 	"github.com/sibtihaj/bolt/app/tfe"
 )
 
+// ── ASCII block art for each letter of "bolt" ─────────────────────────────────
+
+const (
+	artB = "██████╗ \n██╔══██╗\n███████╗\n██╔══██╗\n██████╔╝\n╚═════╝ "
+	artO = " ██████╗ \n██╔═══██╗\n██║   ██║\n██║   ██║\n╚██████╔╝\n ╚═════╝ "
+	artL = "██╗     \n██║     \n██║     \n██║     \n███████╗\n╚══════╝"
+	artT = "████████╗\n╚══██╔══╝\n   ██║   \n   ██║   \n   ██║   \n   ╚═╝   "
+)
+
 // ── Palette ───────────────────────────────────────────────────────────────────
 
 var (
@@ -25,25 +34,10 @@ var (
 	borderFaint = lipgloss.AdaptiveColor{Light: "#D1D5DB", Dark: "#374151"}
 )
 
-// ── Shared styles ─────────────────────────────────────────────────────────────
+// ── Shared styles (also used in interactive_deploy.go) ───────────────────────
 
 var (
-	// Banner
-	bannerBoxStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(tfeColor).
-			Padding(1, 4).
-			Width(58)
-
-	logoStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("#FFFFFF"))
-
-	iconStyle = lipgloss.NewStyle().
-			Foreground(lilacColor)
-
-	taglineStyle = lipgloss.NewStyle().
-			Foreground(lilacColor)
+	taglineStyle = lipgloss.NewStyle().Foreground(lilacColor)
 
 	badgeStyle = lipgloss.NewStyle().
 			Foreground(tfeColor).
@@ -51,7 +45,6 @@ var (
 			Padding(0, 1).
 			Bold(true)
 
-	// Shared section/label styles (also used in interactive_deploy.go)
 	sectionStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(tfeColor).
@@ -60,10 +53,8 @@ var (
 	labelStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.AdaptiveColor{Light: "#4B5563", Dark: "#9CA3AF"})
 
-	dividerStyle = lipgloss.NewStyle().
-			Foreground(borderFaint)
+	dividerStyle = lipgloss.NewStyle().Foreground(borderFaint)
 
-	// Feedback
 	hintStyle = lipgloss.NewStyle().
 			Foreground(mutedColor).
 			Italic(true)
@@ -75,15 +66,9 @@ var (
 			BorderForeground(redColor).
 			Padding(0, 2)
 
-	// Table
-	thStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lilacColor)
+	thStyle = lipgloss.NewStyle().Bold(true).Foreground(lilacColor)
+	tcStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#1F2937", Dark: "#F9FAFB"})
 
-	tcStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "#1F2937", Dark: "#F9FAFB"})
-
-	// Status card
 	cardStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(tfeColor).
@@ -124,24 +109,78 @@ func boltTheme() *huh.Theme {
 
 // ── Banner ────────────────────────────────────────────────────────────────────
 
-func printBanner() {
-	icon := iconStyle.Render("⚡")
-	name := logoStyle.Render(" bolt")
-	badge := badgeStyle.Render(" v" + version + " ")
-
-	// Top line: icon + name left, badge right — padded to fill box inner width
-	innerWidth := 48
-	left := icon + name
-	rightPad := innerWidth - lipgloss.Width(left) - lipgloss.Width(badge)
-	if rightPad < 1 {
-		rightPad = 1
+// buildLogoLines renders the 6-line gradient ASCII-art "bolt" logo.
+// Each letter is colored with a different shade: indigo → violet → purple → fuchsia.
+func buildLogoLines() []string {
+	grad := [4]lipgloss.Color{
+		"#4338CA", // B — deep indigo
+		"#7C3AED", // O — violet
+		"#A855F7", // L — purple
+		"#D946EF", // T — fuchsia
 	}
-	topLine := left + strings.Repeat(" ", rightPad) + badge
+	letters := [4][]string{
+		strings.Split(artB, "\n"),
+		strings.Split(artO, "\n"),
+		strings.Split(artL, "\n"),
+		strings.Split(artT, "\n"),
+	}
+	rows := make([]string, 6)
+	for r := 0; r < 6; r++ {
+		var sb strings.Builder
+		for c := 0; c < 4; c++ {
+			sb.WriteString(lipgloss.NewStyle().Foreground(grad[c]).Render(letters[c][r]))
+			if c < 3 {
+				sb.WriteByte(' ')
+			}
+		}
+		rows[r] = sb.String()
+	}
+	return rows
+}
 
-	tagline := taglineStyle.Render("Terraform Enterprise Provisioner")
+func printBanner() {
+	// ── Left panel: big logo + tagline + version ──────────────────────────────
+	logoLines := buildLogoLines()
+	leftLines := append(logoLines,
+		"",
+		taglineStyle.Render("Terraform Enterprise Provisioner")+"  "+badgeStyle.Render(" v"+version+" "),
+	)
+	leftPanel := lipgloss.NewStyle().
+		Padding(1, 3).
+		Render(strings.Join(leftLines, "\n"))
 
-	content := lipgloss.JoinVertical(lipgloss.Left, topLine, tagline)
-	fmt.Println(bannerBoxStyle.Render(content))
+	// ── Right panel: getting-started tips ─────────────────────────────────────
+	tip := func(s string) string {
+		return "  " + lipgloss.NewStyle().Foreground(lilacColor).Render(s)
+	}
+	rightLines := []string{
+		thStyle.Render("Getting started"),
+		"",
+		hintStyle.Render("Use the menu below, or pass"),
+		hintStyle.Render("flags directly for scripting:"),
+		"",
+		tip("bolt deploy k8s  --name prod"),
+		tip("bolt deploy docker  --name dev"),
+		tip("bolt list"),
+		tip("bolt status  --name prod"),
+		tip("bolt destroy  --name prod"),
+	}
+	rightPanel := lipgloss.NewStyle().
+		Padding(1, 2).
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderLeft(true).
+		BorderLeftForeground(borderFaint).
+		Render(strings.Join(rightLines, "\n"))
+
+	// ── Outer box ─────────────────────────────────────────────────────────────
+	cols := lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, rightPanel)
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(tfeColor).
+		Render(cols)
+
+	fmt.Println()
+	fmt.Println(box)
 	fmt.Println()
 }
 
@@ -168,7 +207,8 @@ func runInteractive() error {
 		).WithTheme(boltTheme()).Run()
 
 		if errors.Is(err, huh.ErrUserAborted) || action == "exit" {
-			fmt.Println("\n" + hintStyle.Render("  Goodbye!") + "  " + iconStyle.Render("⚡") + "\n")
+			fmt.Println("\n" + hintStyle.Render("  Goodbye!") + "  " +
+				lipgloss.NewStyle().Foreground(lipgloss.Color("#D946EF")).Render("⚡") + "\n")
 			return nil
 		}
 		if err != nil {
@@ -218,11 +258,10 @@ func interactiveList() error {
 		return nil
 	}
 
-	cols := []int{18, 8, 14, 18, 0} // widths: name, backend, mode, status, hostname (free)
+	cols := []int{18, 8, 14, 18, 0}
 	headers := []string{"NAME", "BACKEND", "MODE", "STATUS", "HOSTNAME"}
 
 	fmt.Println()
-	// Header row
 	header := "  "
 	for i, h := range headers {
 		cell := thStyle.Render(h)
@@ -234,14 +273,12 @@ func interactiveList() error {
 	fmt.Println(header)
 	fmt.Println("  " + dividerStyle.Render(strings.Repeat("─", 70)))
 
-	// Data rows
 	for _, d := range deployments {
-		icon := statusIcon(d.Status)
 		row := "  " +
 			padRight(tcStyle.Render(d.Name), cols[0]) +
 			padRight(tcStyle.Render(string(d.Backend)), cols[1]) +
 			padRight(tcStyle.Render(string(d.Mode)), cols[2]) +
-			padRight(icon, cols[3]) +
+			padRight(statusIcon(d.Status), cols[3]) +
 			tcStyle.Render(d.Hostname)
 		fmt.Println(row)
 	}
@@ -249,7 +286,7 @@ func interactiveList() error {
 	return nil
 }
 
-// padRight pads a rendered string to a fixed visible width, accounting for ANSI codes.
+// padRight pads a rendered (possibly ANSI-colored) string to a fixed visible width.
 func padRight(s string, width int) string {
 	visible := lipgloss.Width(s)
 	if visible >= width {
@@ -273,8 +310,7 @@ func interactiveStatus() error {
 	options := make([]huh.Option[string], len(deployments))
 	for i, d := range deployments {
 		options[i] = huh.NewOption(
-			fmt.Sprintf("%s  (%s / %s)", d.Name, d.Backend, d.Mode),
-			d.Name,
+			fmt.Sprintf("%s  (%s / %s)", d.Name, d.Backend, d.Mode), d.Name,
 		)
 	}
 
@@ -300,13 +336,12 @@ func interactiveStatus() error {
 		return err
 	}
 
-	icon := statusIcon(d.Status)
 	card := lipgloss.JoinVertical(lipgloss.Left,
 		sectionStyle.Render(d.Name),
 		"",
 		labelStyle.Render("Backend:  ")+tcStyle.Render(string(d.Backend)),
 		labelStyle.Render("Mode:     ")+tcStyle.Render(string(d.Mode)),
-		labelStyle.Render("Status:   ")+icon,
+		labelStyle.Render("Status:   ")+statusIcon(d.Status),
 		labelStyle.Render("URL:      ")+tcStyle.Render("https://"+d.Hostname),
 		labelStyle.Render("Updated:  ")+tcStyle.Render(d.UpdatedAt.Format("2006-01-02 15:04:05")),
 	)
@@ -338,8 +373,7 @@ func interactiveDestroy() error {
 	options := make([]huh.Option[string], len(deployments))
 	for i, d := range deployments {
 		options[i] = huh.NewOption(
-			fmt.Sprintf("%s  (%s / %s)", d.Name, d.Backend, d.Mode),
-			d.Name,
+			fmt.Sprintf("%s  (%s / %s)", d.Name, d.Backend, d.Mode), d.Name,
 		)
 	}
 
