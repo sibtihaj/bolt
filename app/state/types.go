@@ -61,10 +61,12 @@ type TFEDeployment struct {
 	AKSClusterName  string `json:"aks_cluster_name,omitempty"`
 	AKSResourceGroup string `json:"aks_resource_group,omitempty"`
 	// Storage references (non-secret, just names/regions)
-	StorageConfig *StorageConfig   `json:"storage_config,omitempty"`
-	Status        DeploymentStatus `json:"status"`
-	CreatedAt     time.Time        `json:"created_at"`
-	UpdatedAt     time.Time        `json:"updated_at"`
+	StorageConfig *StorageConfig `json:"storage_config,omitempty"`
+	// InfraState tracks cloud resources bolt provisioned for this deployment.
+	InfraState *InfraState      `json:"infra_state,omitempty"`
+	Status     DeploymentStatus `json:"status"`
+	CreatedAt  time.Time        `json:"created_at"`
+	UpdatedAt  time.Time        `json:"updated_at"`
 }
 
 // StorageConfig holds non-secret storage references. Credentials (access
@@ -72,4 +74,48 @@ type TFEDeployment struct {
 type StorageConfig struct {
 	S3Bucket string `json:"s3_bucket,omitempty"`
 	S3Region string `json:"s3_region,omitempty"`
+}
+
+// ProvisionMode mirrors infra.ProvisionMode to avoid an import cycle.
+type ProvisionMode string
+
+const (
+	ProvisionAll         ProvisionMode = "all"
+	ProvisionStorageOnly ProvisionMode = "storage-only"
+	ProvisionBYO         ProvisionMode = "byo"
+)
+
+// DatabaseChoice records where PostgreSQL runs for this deployment.
+type DatabaseChoice string
+
+const (
+	DBManaged   DatabaseChoice = "managed"
+	DBInCluster DatabaseChoice = "in-cluster"
+	DBBYO       DatabaseChoice = "byo"
+)
+
+// InfraState records what bolt provisioned so Destroy can clean it up.
+// Non-secret references only — credentials are never stored here.
+type InfraState struct {
+	ProvisionMode  ProvisionMode  `json:"provision_mode"`
+	Cloud          string         `json:"cloud,omitempty"`
+	DatabaseChoice DatabaseChoice `json:"database_choice,omitempty"`
+
+	// AWS-provisioned resources
+	VPCID               string   `json:"vpc_id,omitempty"`
+	SubnetIDs           []string `json:"subnet_ids,omitempty"`
+	EKSClusterCreated   string   `json:"eks_cluster_created,omitempty"`
+	RDSInstanceID       string   `json:"rds_instance_id,omitempty"`
+	S3BucketCreated     string   `json:"s3_bucket_created,omitempty"`
+
+	// Azure-provisioned resources
+	AzureRGCreated         string `json:"azure_rg_created,omitempty"`
+	AzureStorageAccount    string `json:"azure_storage_account,omitempty"`
+	AzurePostgresServer    string `json:"azure_postgres_server,omitempty"`
+	AKSClusterCreated      string `json:"aks_cluster_created,omitempty"`
+
+	// GCP-provisioned resources
+	GCSBucketCreated      string `json:"gcs_bucket_created,omitempty"`
+	CloudSQLInstanceID    string `json:"cloudsql_instance_id,omitempty"`
+	GKEClusterCreated     string `json:"gke_cluster_created,omitempty"`
 }
