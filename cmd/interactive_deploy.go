@@ -27,7 +27,7 @@ func interactiveDeploy() error {
 				).
 				Value(&backend),
 		),
-	).WithTheme(huh.ThemeCharm()).Run()
+	).WithTheme(boltTheme()).Run()
 
 	if errors.Is(err, huh.ErrUserAborted) {
 		return nil
@@ -225,7 +225,7 @@ func interactiveDeployK8s() error {
 				Value(&redisURL).
 				Validate(notEmpty("Redis URL")),
 		).WithHideFunc(func() bool { return mode != "active-active" }),
-	).WithTheme(huh.ThemeCharm()).Run()
+	).WithTheme(boltTheme()).Run()
 
 	if errors.Is(err, huh.ErrUserAborted) {
 		fmt.Println("Cancelled.")
@@ -259,7 +259,7 @@ func interactiveDeployK8s() error {
 				Negative("Cancel").
 				Value(&confirmed),
 		),
-	).WithTheme(huh.ThemeCharm()).Run()
+	).WithTheme(boltTheme()).Run()
 
 	if errors.Is(err, huh.ErrUserAborted) || !confirmed {
 		fmt.Println("Deployment cancelled.")
@@ -476,7 +476,7 @@ func interactiveDeployDocker() error {
 				Value(&redisURL).
 				Validate(notEmpty("Redis URL")),
 		).WithHideFunc(func() bool { return mode != "active-active" }),
-	).WithTheme(huh.ThemeCharm()).Run()
+	).WithTheme(boltTheme()).Run()
 
 	if errors.Is(err, huh.ErrUserAborted) {
 		fmt.Println("Cancelled.")
@@ -507,7 +507,7 @@ func interactiveDeployDocker() error {
 				Negative("Cancel").
 				Value(&confirmed),
 		),
-	).WithTheme(huh.ThemeCharm()).Run()
+	).WithTheme(boltTheme()).Run()
 
 	if errors.Is(err, huh.ErrUserAborted) || !confirmed {
 		fmt.Println("Deployment cancelled.")
