@@ -29,8 +29,8 @@ var versionCmd = &cobra.Command{
 		line1 := lipgloss.NewStyle().Bold(true).Foreground(amberColor).Render(
 			"A newer version is available: v" + rel.Version,
 		)
-		line2 := "Run: " + lipgloss.NewStyle().Foreground(lilacColor).Render("brew upgrade sibtihaj/tap/bolt")
-		line3 := "Release notes: " + lipgloss.NewStyle().Foreground(lilacColor).Render(rel.URL)
+		line2 := "Run: " + lipgloss.NewStyle().Foreground(cyanBright).Render("brew upgrade sibtihaj/tap/bolt")
+		line3 := "Release notes: " + lipgloss.NewStyle().Foreground(cyanBright).Render(rel.URL)
 		fmt.Println(updateNoticeStyle.Render(
 			lipgloss.JoinVertical(lipgloss.Left, line1, "", line2, line3),
 		))

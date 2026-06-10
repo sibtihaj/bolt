@@ -23,26 +23,34 @@ const (
 	artT = "████████╗\n╚══██╔══╝\n   ██║   \n   ██║   \n   ██║   \n   ╚═╝   "
 )
 
-// ── Palette ───────────────────────────────────────────────────────────────────
+// ── Palette — electric lightning: gold core → cyan sky ───────────────────────
+//
+// The gradient evokes a lightning bolt: white-hot yellow at the strike point
+// cooling to electric cyan/teal at the edges — nothing like Gemini (blue-purple)
+// or Claude Code (orange-to-mauve).
 
 var (
-	tfeColor    = lipgloss.Color("#5C4EE5")
-	lilacColor  = lipgloss.Color("#9B8FFF")
-	greenColor  = lipgloss.Color("#22C55E")
-	redColor    = lipgloss.Color("#EF4444")
-	amberColor  = lipgloss.Color("#F59E0B")
+	// Primary UI: electric cyan — borders, titles, badges
+	tfeColor = lipgloss.Color("#00C8E8")
+	// Accent: brighter cyan — selectors, prompts, tips
+	cyanBright = lipgloss.Color("#3FEEFF")
+	// Status colours — universal, kept intentionally simple
+	greenColor = lipgloss.Color("#22C55E")
+	redColor   = lipgloss.Color("#EF4444")
+	amberColor = lipgloss.Color("#F59E0B")
+	// Neutral tones
 	mutedColor  = lipgloss.AdaptiveColor{Light: "#6B7280", Dark: "#9CA3AF"}
-	borderFaint = lipgloss.AdaptiveColor{Light: "#D1D5DB", Dark: "#374151"}
+	borderFaint = lipgloss.AdaptiveColor{Light: "#CBD5E1", Dark: "#1E3A4A"}
 )
 
 // ── Shared styles (also used in interactive_deploy.go) ───────────────────────
 
 var (
-	taglineStyle = lipgloss.NewStyle().Foreground(lilacColor)
+	taglineStyle = lipgloss.NewStyle().Foreground(cyanBright)
 
 	badgeStyle = lipgloss.NewStyle().
-			Foreground(tfeColor).
-			Background(lipgloss.AdaptiveColor{Light: "#EDE9FE", Dark: "#2D1B69"}).
+			Foreground(lipgloss.Color("#003D47")).
+			Background(tfeColor).
 			Padding(0, 1).
 			Bold(true)
 
@@ -67,37 +75,42 @@ var (
 			BorderForeground(redColor).
 			Padding(0, 2)
 
-	thStyle = lipgloss.NewStyle().Bold(true).Foreground(lilacColor)
-	tcStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#1F2937", Dark: "#F9FAFB"})
+	thStyle = lipgloss.NewStyle().Bold(true).Foreground(tfeColor)
+	tcStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#0F172A", Dark: "#F0FDFF"})
 
 	cardStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(tfeColor).
 			Padding(1, 3).
 			Width(52)
+
+	updateNoticeStyle = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(amberColor).
+				Padding(0, 2)
 )
 
 // ── Custom bolt theme for huh forms ──────────────────────────────────────────
 
 func boltTheme() *huh.Theme {
 	t := huh.ThemeCharm()
-	purple := lipgloss.AdaptiveColor{Light: "#5C4EE5", Dark: "#9B8FFF"}
-	purpleBright := lipgloss.Color("#5C4EE5")
-	cream := lipgloss.AdaptiveColor{Light: "#FFFDF5", Dark: "#FFFDF5"}
+	cyan := lipgloss.AdaptiveColor{Light: "#00A8C8", Dark: "#00C8E8"}
+	cyanPrimary := lipgloss.Color("#00C8E8")
+	darkBg := lipgloss.AdaptiveColor{Light: "#FFFDF5", Dark: "#001A1F"}
 
-	t.Focused.Title = t.Focused.Title.Foreground(purple).Bold(true)
-	t.Focused.NoteTitle = t.Focused.NoteTitle.Foreground(purple).Bold(true)
-	t.Focused.SelectSelector = t.Focused.SelectSelector.Foreground(lilacColor)
-	t.Focused.NextIndicator = t.Focused.NextIndicator.Foreground(lilacColor)
-	t.Focused.PrevIndicator = t.Focused.PrevIndicator.Foreground(lilacColor)
-	t.Focused.MultiSelectSelector = t.Focused.MultiSelectSelector.Foreground(lilacColor)
+	t.Focused.Title = t.Focused.Title.Foreground(cyan).Bold(true)
+	t.Focused.NoteTitle = t.Focused.NoteTitle.Foreground(cyan).Bold(true)
+	t.Focused.SelectSelector = t.Focused.SelectSelector.Foreground(cyanBright)
+	t.Focused.NextIndicator = t.Focused.NextIndicator.Foreground(cyanBright)
+	t.Focused.PrevIndicator = t.Focused.PrevIndicator.Foreground(cyanBright)
+	t.Focused.MultiSelectSelector = t.Focused.MultiSelectSelector.Foreground(cyanBright)
 	t.Focused.SelectedOption = t.Focused.SelectedOption.Foreground(lipgloss.Color("#22C55E"))
 	t.Focused.SelectedPrefix = lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#22C55E")).SetString("✓ ")
 	t.Focused.FocusedButton = t.Focused.FocusedButton.
-		Foreground(cream).Background(purpleBright)
+		Foreground(darkBg).Background(cyanPrimary)
 	t.Focused.TextInput.Cursor = t.Focused.TextInput.Cursor.Foreground(lipgloss.Color("#22C55E"))
-	t.Focused.TextInput.Prompt = t.Focused.TextInput.Prompt.Foreground(lilacColor)
+	t.Focused.TextInput.Prompt = t.Focused.TextInput.Prompt.Foreground(cyanBright)
 	t.Blurred = t.Focused
 	t.Blurred.Base = t.Focused.Base.BorderStyle(lipgloss.HiddenBorder())
 	t.Blurred.Card = t.Blurred.Base
@@ -111,13 +124,13 @@ func boltTheme() *huh.Theme {
 // ── Banner ────────────────────────────────────────────────────────────────────
 
 // buildLogoLines renders the 6-line gradient ASCII-art "bolt" logo.
-// Each letter is colored with a different shade: indigo → violet → purple → fuchsia.
+// Lightning gradient: gold strike core → electric cyan sky.
 func buildLogoLines() []string {
 	grad := [4]lipgloss.Color{
-		"#4338CA", // B — deep indigo
-		"#7C3AED", // O — violet
-		"#A855F7", // L — purple
-		"#D946EF", // T — fuchsia
+		"#FFE033", // B — golden yellow (lightning core)
+		"#7FE7FF", // O — pale electric blue
+		"#3FEEFF", // L — bright cyan
+		"#00C8E8", // T — teal (sky)
 	}
 	letters := [4][]string{
 		strings.Split(artB, "\n"),
@@ -152,7 +165,7 @@ func printBanner() {
 
 	// ── Right panel: getting-started tips ─────────────────────────────────────
 	tip := func(s string) string {
-		return "  " + lipgloss.NewStyle().Foreground(lilacColor).Render(s)
+		return "  " + lipgloss.NewStyle().Foreground(cyanBright).Render(s)
 	}
 	rightLines := []string{
 		thStyle.Render("Getting started"),
@@ -187,12 +200,6 @@ func printBanner() {
 
 // ── Main loop ─────────────────────────────────────────────────────────────────
 
-// updateNoticStyle is the box shown when a newer bolt version is available.
-var updateNoticeStyle = lipgloss.NewStyle().
-	Border(lipgloss.RoundedBorder()).
-	BorderForeground(amberColor).
-	Padding(0, 2)
-
 func showUpdateNotice(rel *update.Release) {
 	line1 := lipgloss.NewStyle().Bold(true).Foreground(amberColor).Render(
 		"⚡  A new version of bolt is available: v" + rel.Version,
@@ -200,7 +207,7 @@ func showUpdateNotice(rel *update.Release) {
 	line2 := labelStyle.Render("Upgrade:  ") +
 		tcStyle.Render("brew upgrade sibtihaj/tap/bolt")
 	line3 := labelStyle.Render("Release notes:  ") +
-		lipgloss.NewStyle().Foreground(lilacColor).Render(rel.URL)
+		lipgloss.NewStyle().Foreground(cyanBright).Render(rel.URL)
 	fmt.Println(updateNoticeStyle.Render(
 		lipgloss.JoinVertical(lipgloss.Left, line1, "", line2, line3),
 	))
