@@ -9,8 +9,23 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	smithy "github.com/aws/smithy-go"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
+	"github.com/sibtihaj/bolt/app/infra/errs"
 )
+
+// S3NameConflictError is returned when the requested bucket name is already
+// owned by another AWS account (globally unique namespace collision).
+type S3NameConflictError struct {
+	Config     aws.Config
+	BucketName string
+	Cause      error
+}
+
+func (e *S3NameConflictError) Error() string        { return e.Cause.Error() }
+func (e *S3NameConflictError) Unwrap() error        { return e.Cause }
+func (e *S3NameConflictError) Kind() errs.ErrorKind { return errs.KindNameConflict }
+func (e *S3NameConflictError) Resource() string     { return "S3 bucket" }
 
 // EnsureS3Bucket creates the bucket if it does not already exist and enables
 // versioning.  Returns the bucket name.
@@ -44,8 +59,15 @@ func EnsureS3Bucket(ctx context.Context, cfg aws.Config, bucketName, region stri
 		}
 	}
 
-	if _, err := client.CreateBucket(ctx, createInput); err != nil {
-		return "", fmt.Errorf("creating S3 bucket %q in %s: %w", bucketName, region, err)
+	if createErr := errs.Do(ctx, 5, func() error {
+		_, err := client.CreateBucket(ctx, createInput)
+		return err
+	}, nil); createErr != nil {
+		var apiErr smithy.APIError
+		if errors.As(createErr, &apiErr) && apiErr.ErrorCode() == "BucketAlreadyExists" {
+			return "", &S3NameConflictError{Config: cfg, BucketName: bucketName, Cause: createErr}
+		}
+		return "", fmt.Errorf("creating S3 bucket %q in %s: %w", bucketName, region, createErr)
 	}
 
 	// Block all public access.

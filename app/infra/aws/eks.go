@@ -3,6 +3,7 @@ package aws
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,7 +13,115 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/eks"
 	"github.com/aws/aws-sdk-go-v2/service/eks/types"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
+	smithy "github.com/aws/smithy-go"
+	"github.com/sibtihaj/bolt/app/infra/errs"
 )
+
+// EKSQuotaError is returned when the account EKS cluster quota is exhausted.
+type EKSQuotaError struct {
+	Config aws.Config
+	Cause  error
+}
+
+func (e *EKSQuotaError) Error() string        { return e.Cause.Error() }
+func (e *EKSQuotaError) Unwrap() error        { return e.Cause }
+func (e *EKSQuotaError) Kind() errs.ErrorKind { return errs.KindQuota }
+func (e *EKSQuotaError) Resource() string     { return "EKS cluster" }
+
+// EKSClusterExistsError is returned when a cluster with the requested name
+// already exists in the account but was NOT created by bolt (no bolt ownership
+// tag).  The cmd layer uses it to ask the user whether to adopt or destroy.
+type EKSClusterExistsError struct {
+	Config      aws.Config
+	ClusterName string
+	Status      string
+	Version     string
+}
+
+func (e *EKSClusterExistsError) Error() string {
+	return fmt.Sprintf("EKS cluster %q already exists (status: %s, k8s %s)", e.ClusterName, e.Status, e.Version)
+}
+func (e *EKSClusterExistsError) Unwrap() error        { return nil }
+func (e *EKSClusterExistsError) Kind() errs.ErrorKind { return errs.KindConfig }
+func (e *EKSClusterExistsError) Resource() string     { return "EKS cluster" }
+
+// EKSDetail holds extended information about an existing EKS cluster including
+// tags, which are used to determine whether bolt owns the cluster.
+type EKSDetail struct {
+	Status  string
+	Version string
+	Tags    map[string]string
+}
+
+// GetEKSClusterDetail returns status, version and tags for the named cluster.
+// Returns a non-nil error if the cluster does not exist or cannot be described.
+func GetEKSClusterDetail(ctx context.Context, cfg aws.Config, name string) (*EKSDetail, error) {
+	client := eks.NewFromConfig(cfg)
+	out, err := client.DescribeCluster(ctx, &eks.DescribeClusterInput{Name: aws.String(name)})
+	if err != nil || out.Cluster == nil {
+		return nil, err
+	}
+	return &EKSDetail{
+		Status:  string(out.Cluster.Status),
+		Version: aws.ToString(out.Cluster.Version),
+		Tags:    out.Cluster.Tags,
+	}, nil
+}
+
+// WriteEKSKubeconfig writes a kubeconfig for the given cluster and returns
+// its path.  Useful for adopting an existing cluster without going through
+// EnsureEKSCluster.
+func WriteEKSKubeconfig(ctx context.Context, cfg aws.Config, clusterName, region string) (string, error) {
+	return writeEKSKubeconfig(ctx, cfg, clusterName, region)
+}
+
+// EKSInfo is a summary of an existing EKS cluster for display in the heal picker.
+type EKSInfo struct {
+	Name    string
+	Status  string
+	Version string
+	Region  string
+}
+
+// Label returns a human-friendly one-liner for the huh selector.
+func (e EKSInfo) Label() string {
+	return fmt.Sprintf("%-32s  %-10s  k8s %s", e.Name, e.Status, e.Version)
+}
+
+// ListEKSClusters returns all EKS clusters in the region with their metadata.
+func ListEKSClusters(ctx context.Context, cfg aws.Config) ([]EKSInfo, error) {
+	client := eks.NewFromConfig(cfg)
+	out, err := client.ListClusters(ctx, &eks.ListClustersInput{})
+	if err != nil {
+		return nil, fmt.Errorf("listing EKS clusters: %w", err)
+	}
+	result := make([]EKSInfo, 0, len(out.Clusters))
+	for _, name := range out.Clusters {
+		name := name
+		desc, err := client.DescribeCluster(ctx, &eks.DescribeClusterInput{Name: aws.String(name)})
+		if err != nil || desc.Cluster == nil {
+			result = append(result, EKSInfo{Name: name, Status: "unknown"})
+			continue
+		}
+		result = append(result, EKSInfo{
+			Name:    name,
+			Status:  string(desc.Cluster.Status),
+			Version: aws.ToString(desc.Cluster.Version),
+		})
+	}
+	return result, nil
+}
+
+// EKSClusterStatus returns the current status of an EKS cluster
+// (e.g. CREATING, ACTIVE, DELETING).  Returns "unknown" on error.
+func EKSClusterStatus(ctx context.Context, cfg aws.Config, name string) string {
+	client := eks.NewFromConfig(cfg)
+	out, err := client.DescribeCluster(ctx, &eks.DescribeClusterInput{Name: aws.String(name)})
+	if err != nil || out.Cluster == nil {
+		return "unknown"
+	}
+	return string(out.Cluster.Status)
+}
 
 // EKSConfig holds parameters for provisioning an EKS cluster.
 type EKSConfig struct {
@@ -59,6 +168,14 @@ func EnsureEKSCluster(ctx context.Context, cfg aws.Config, ecfg *EKSConfig) (str
 		if k8sVersion == "" {
 			k8sVersion = "1.30"
 		}
+		// Merge bolt ownership tag so we can distinguish bolt-managed clusters
+		// from externally-created ones on future runs.
+		clusterTags := make(map[string]string, len(ecfg.Tags)+1)
+		for k, v := range ecfg.Tags {
+			clusterTags[k] = v
+		}
+		clusterTags["bolt:deployment"] = ecfg.ClusterName
+
 		createIn := &eks.CreateClusterInput{
 			Name:    aws.String(ecfg.ClusterName),
 			Version: aws.String(k8sVersion),
@@ -67,10 +184,17 @@ func EnsureEKSCluster(ctx context.Context, cfg aws.Config, ecfg *EKSConfig) (str
 				SubnetIds:        ecfg.SubnetIDs,
 				SecurityGroupIds: ecfg.SecurityGroupIDs,
 			},
-			Tags: ecfg.Tags,
+			Tags: clusterTags,
 		}
-		if _, err := client.CreateCluster(ctx, createIn); err != nil {
-			return "", fmt.Errorf("creating EKS cluster %q: %w", ecfg.ClusterName, err)
+		if createErr := errs.Do(ctx, 5, func() error {
+			_, err := client.CreateCluster(ctx, createIn)
+			return err
+		}, nil); createErr != nil {
+			var apiErr smithy.APIError
+			if errors.As(createErr, &apiErr) && apiErr.ErrorCode() == "ResourceLimitExceededException" {
+				return "", &EKSQuotaError{Config: cfg, Cause: createErr}
+			}
+			return "", fmt.Errorf("creating EKS cluster %q: %w", ecfg.ClusterName, createErr)
 		}
 	}
 
@@ -118,21 +242,23 @@ func ensureNodeGroup(ctx context.Context, client *eks.Client, ecfg *EKSConfig, n
 		maxSize = desired + 2
 	}
 
-	_, err = client.CreateNodegroup(ctx, &eks.CreateNodegroupInput{
-		ClusterName:   aws.String(ecfg.ClusterName),
-		NodegroupName: aws.String(ecfg.NodeGroupName),
-		NodeRole:      aws.String(nodeRoleARN),
-		Subnets:       ecfg.SubnetIDs,
-		InstanceTypes: []string{ecfg.NodeInstanceType},
-		ScalingConfig: &types.NodegroupScalingConfig{
-			DesiredSize: aws.Int32(desired),
-			MinSize:     aws.Int32(minSize),
-			MaxSize:     aws.Int32(maxSize),
-		},
-		Tags: ecfg.Tags,
-	})
-	if err != nil {
-		return fmt.Errorf("creating EKS node group %q: %w", ecfg.NodeGroupName, err)
+	if createErr := errs.Do(ctx, 5, func() error {
+		_, err = client.CreateNodegroup(ctx, &eks.CreateNodegroupInput{
+			ClusterName:   aws.String(ecfg.ClusterName),
+			NodegroupName: aws.String(ecfg.NodeGroupName),
+			NodeRole:      aws.String(nodeRoleARN),
+			Subnets:       ecfg.SubnetIDs,
+			InstanceTypes: []string{ecfg.NodeInstanceType},
+			ScalingConfig: &types.NodegroupScalingConfig{
+				DesiredSize: aws.Int32(desired),
+				MinSize:     aws.Int32(minSize),
+				MaxSize:     aws.Int32(maxSize),
+			},
+			Tags: ecfg.Tags,
+		})
+		return err
+	}, nil); createErr != nil {
+		return fmt.Errorf("creating EKS node group %q: %w", ecfg.NodeGroupName, createErr)
 	}
 
 	// Wait for node group to become ACTIVE.

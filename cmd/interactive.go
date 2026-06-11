@@ -14,7 +14,7 @@ import (
 	"github.com/sibtihaj/bolt/app/update"
 )
 
-// ── ASCII block art for each letter of "bolt" ─────────────────────────────────
+// ── ASCII block art for each letter of "bolt" ────────────────────────────────
 
 const (
 	artB = "██████╗ \n██╔══██╗\n███████╗\n██╔══██╗\n██████╔╝\n╚═════╝ "
@@ -23,24 +23,20 @@ const (
 	artT = "████████╗\n╚══██╔══╝\n   ██║   \n   ██║   \n   ██║   \n   ╚═╝   "
 )
 
-// ── Palette — electric lightning: gold core → cyan sky ───────────────────────
-//
-// The gradient evokes a lightning bolt: white-hot yellow at the strike point
-// cooling to electric cyan/teal at the edges — nothing like Gemini (blue-purple)
-// or Claude Code (orange-to-mauve).
+// ── Palette — ember: deep orange core → warm amber glow ──────────────────────
 
 var (
-	// Primary UI: electric cyan — borders, titles, badges
-	tfeColor = lipgloss.Color("#00C8E8")
-	// Accent: brighter cyan — selectors, prompts, tips
-	cyanBright = lipgloss.Color("#3FEEFF")
+	// Primary UI: deep orange — borders, titles, badges
+	tfeColor = lipgloss.Color("#F97316")
+	// Accent: amber — selectors, prompts, tips
+	cyanBright = lipgloss.Color("#FBBF24")
 	// Status colours — universal, kept intentionally simple
 	greenColor = lipgloss.Color("#22C55E")
 	redColor   = lipgloss.Color("#EF4444")
-	amberColor = lipgloss.Color("#F59E0B")
+	amberColor = lipgloss.Color("#F97316")
 	// Neutral tones
 	mutedColor  = lipgloss.AdaptiveColor{Light: "#6B7280", Dark: "#9CA3AF"}
-	borderFaint = lipgloss.AdaptiveColor{Light: "#CBD5E1", Dark: "#1E3A4A"}
+	borderFaint = lipgloss.AdaptiveColor{Light: "#CBD5E1", Dark: "#2D1A0A"}
 )
 
 // ── Shared styles (also used in interactive_deploy.go) ───────────────────────
@@ -49,7 +45,7 @@ var (
 	taglineStyle = lipgloss.NewStyle().Foreground(cyanBright)
 
 	badgeStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#003D47")).
+			Foreground(lipgloss.Color("#1C0700")).
 			Background(tfeColor).
 			Padding(0, 1).
 			Bold(true)
@@ -94,12 +90,12 @@ var (
 
 func boltTheme() *huh.Theme {
 	t := huh.ThemeCharm()
-	cyan := lipgloss.AdaptiveColor{Light: "#00A8C8", Dark: "#00C8E8"}
-	cyanPrimary := lipgloss.Color("#00C8E8")
-	darkBg := lipgloss.AdaptiveColor{Light: "#FFFDF5", Dark: "#001A1F"}
+	ember := lipgloss.AdaptiveColor{Light: "#EA6C00", Dark: "#F97316"}
+	emberPrimary := lipgloss.Color("#F97316")
+	darkBg := lipgloss.AdaptiveColor{Light: "#FFF7ED", Dark: "#1C0700"}
 
-	t.Focused.Title = t.Focused.Title.Foreground(cyan).Bold(true)
-	t.Focused.NoteTitle = t.Focused.NoteTitle.Foreground(cyan).Bold(true)
+	t.Focused.Title = t.Focused.Title.Foreground(ember).Bold(true)
+	t.Focused.NoteTitle = t.Focused.NoteTitle.Foreground(ember).Bold(true)
 	t.Focused.SelectSelector = t.Focused.SelectSelector.Foreground(cyanBright)
 	t.Focused.NextIndicator = t.Focused.NextIndicator.Foreground(cyanBright)
 	t.Focused.PrevIndicator = t.Focused.PrevIndicator.Foreground(cyanBright)
@@ -108,7 +104,7 @@ func boltTheme() *huh.Theme {
 	t.Focused.SelectedPrefix = lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#22C55E")).SetString("✓ ")
 	t.Focused.FocusedButton = t.Focused.FocusedButton.
-		Foreground(darkBg).Background(cyanPrimary)
+		Foreground(darkBg).Background(emberPrimary)
 	t.Focused.TextInput.Cursor = t.Focused.TextInput.Cursor.Foreground(lipgloss.Color("#22C55E"))
 	t.Focused.TextInput.Prompt = t.Focused.TextInput.Prompt.Foreground(cyanBright)
 	t.Blurred = t.Focused
@@ -124,13 +120,13 @@ func boltTheme() *huh.Theme {
 // ── Banner ────────────────────────────────────────────────────────────────────
 
 // buildLogoLines renders the 6-line gradient ASCII-art "bolt" logo.
-// Lightning gradient: gold strike core → electric cyan sky.
+// Ember gradient: deep red → orange → amber glow.
 func buildLogoLines() []string {
 	grad := [4]lipgloss.Color{
-		"#FFE033", // B — golden yellow (lightning core)
-		"#7FE7FF", // O — pale electric blue
-		"#3FEEFF", // L — bright cyan
-		"#00C8E8", // T — teal (sky)
+		"#DC2626", // B — deep red
+		"#F97316", // O — orange
+		"#FB923C", // L — light orange
+		"#FBBF24", // T — amber
 	}
 	letters := [4][]string{
 		strings.Split(artB, "\n"),
@@ -153,7 +149,7 @@ func buildLogoLines() []string {
 }
 
 func printBanner() {
-	// ── Left panel: big logo + tagline + version ──────────────────────────────
+	// ── Left panel: bolt icon + logo + tagline + version ──────────────────────
 	logoLines := buildLogoLines()
 	leftLines := append(logoLines,
 		"",
@@ -163,21 +159,35 @@ func printBanner() {
 		Padding(1, 3).
 		Render(strings.Join(leftLines, "\n"))
 
-	// ── Right panel: getting-started tips ─────────────────────────────────────
-	tip := func(s string) string {
-		return "  " + lipgloss.NewStyle().Foreground(cyanBright).Render(s)
+	// ── Right panel: quick-start commands + deployment count ──────────────────
+	accent := lipgloss.NewStyle().Foreground(cyanBright)
+	tip := func(icon, s string) string {
+		return "  " + lipgloss.NewStyle().Foreground(tfeColor).Render(icon) + "  " + accent.Render(s)
 	}
+
+	deployments, _ := state.List()
+	var deployLine string
+	switch len(deployments) {
+	case 0:
+		deployLine = hintStyle.Render("  No active deployments")
+	case 1:
+		deployLine = lipgloss.NewStyle().Foreground(greenColor).Render("  ● 1 active deployment")
+	default:
+		deployLine = lipgloss.NewStyle().Foreground(greenColor).Render(
+			fmt.Sprintf("  ● %d active deployments", len(deployments)))
+	}
+
 	rightLines := []string{
-		thStyle.Render("Getting started"),
+		thStyle.Render("Quick start"),
 		"",
-		hintStyle.Render("Use the menu below, or pass"),
-		hintStyle.Render("flags directly for scripting:"),
+		tip("›", "bolt deploy k8s  --name prod"),
+		tip("›", "bolt deploy docker  --name dev"),
+		tip("›", "bolt list"),
+		tip("›", "bolt status  --name prod"),
+		tip("›", "bolt destroy  --name prod"),
 		"",
-		tip("bolt deploy k8s  --name prod"),
-		tip("bolt deploy docker  --name dev"),
-		tip("bolt list"),
-		tip("bolt status  --name prod"),
-		tip("bolt destroy  --name prod"),
+		dividerStyle.Render("  " + strings.Repeat("─", 30)),
+		deployLine,
 	}
 	rightPanel := lipgloss.NewStyle().
 		Padding(1, 2).
@@ -227,8 +237,9 @@ func runInteractive() error {
 			huh.NewGroup(
 				huh.NewSelect[string]().
 					Title("What would you like to do?").
+					Description("↑ ↓ navigate   enter select   ctrl+c exit").
 					Options(
-						huh.NewOption("  ›  Deploy Terraform Enterprise", "deploy"),
+						huh.NewOption("  ⚡  Deploy Terraform Enterprise", "deploy"),
 						huh.NewOption("  ✗  Destroy a deployment", "destroy"),
 						huh.NewOption("  ≡  List deployments", "list"),
 						huh.NewOption("  ◎  Check deployment status", "status"),
@@ -239,8 +250,12 @@ func runInteractive() error {
 		).WithTheme(boltTheme()).Run()
 
 		if errors.Is(err, huh.ErrUserAborted) || action == "exit" {
-			fmt.Println("\n" + hintStyle.Render("  Goodbye!") + "  " +
-				lipgloss.NewStyle().Foreground(lipgloss.Color("#D946EF")).Render("⚡") + "\n")
+			fmt.Println()
+			fmt.Println(lipgloss.NewStyle().
+				Foreground(tfeColor).Bold(true).
+				Render("  ⚡  See you next time!"))
+			fmt.Println(hintStyle.Render("  bolt is ready when you are."))
+			fmt.Println()
 			// Show update notice if a newer version was found during this session.
 			select {
 			case rel := <-updateCh:
@@ -270,11 +285,12 @@ func runInteractive() error {
 		}
 
 		if actionErr != nil {
+			fmt.Println()
 			fmt.Println(errorBoxStyle.Render("  ✗  " + actionErr.Error()))
 		}
 
 		waitForEnter()
-		fmt.Println(dividerStyle.Render("  " + strings.Repeat("─", 54)))
+		fmt.Println(dividerStyle.Render("  " + strings.Repeat("─", 60)))
 		fmt.Println()
 	}
 }

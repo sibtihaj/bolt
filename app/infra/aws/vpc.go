@@ -3,13 +3,147 @@ package aws
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	smithy "github.com/aws/smithy-go"
+	"github.com/sibtihaj/bolt/app/infra/errs"
 )
+
+// VpcLimitExceededError is returned when the AWS account has reached its VPC
+// quota. It carries the AWS config so the caller can list / delete VPCs.
+type VpcLimitExceededError struct {
+	Config aws.Config
+	Cause  error
+}
+
+func (e *VpcLimitExceededError) Error() string    { return e.Cause.Error() }
+func (e *VpcLimitExceededError) Unwrap() error    { return e.Cause }
+func (e *VpcLimitExceededError) Kind() errs.ErrorKind { return errs.KindQuota }
+func (e *VpcLimitExceededError) Resource() string     { return "VPC" }
+
+// VPCInfo is a summary of a single VPC for display in the healing picker.
+type VPCInfo struct {
+	VPCID   string
+	Name    string
+	CIDR    string
+	State   string
+	Default bool
+	Subnets int
+}
+
+// Label returns a human-friendly one-liner for the huh selector.
+func (v VPCInfo) Label() string {
+	name := v.Name
+	if name == "" {
+		name = "(unnamed)"
+	}
+	tag := ""
+	if v.Default {
+		tag = "  [default]"
+	}
+	return fmt.Sprintf("%-22s  %-28s  %s  (%d subnets)%s",
+		v.VPCID, name, v.CIDR, v.Subnets, tag)
+}
+
+// ListVPCs returns all VPCs in the region, enriched with subnet counts.
+func ListVPCs(ctx context.Context, cfg aws.Config) ([]VPCInfo, error) {
+	client := ec2.NewFromConfig(cfg)
+	vpcOut, err := client.DescribeVpcs(ctx, &ec2.DescribeVpcsInput{})
+	if err != nil {
+		return nil, fmt.Errorf("listing VPCs: %w", err)
+	}
+
+	// Fetch subnet counts per VPC in one call.
+	subOut, _ := client.DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{})
+	subnetCount := map[string]int{}
+	if subOut != nil {
+		for _, s := range subOut.Subnets {
+			subnetCount[aws.ToString(s.VpcId)]++
+		}
+	}
+
+	result := make([]VPCInfo, 0, len(vpcOut.Vpcs))
+	for _, v := range vpcOut.Vpcs {
+		id := aws.ToString(v.VpcId)
+		info := VPCInfo{
+			VPCID:   id,
+			CIDR:    aws.ToString(v.CidrBlock),
+			State:   string(v.State),
+			Default: aws.ToBool(v.IsDefault),
+			Subnets: subnetCount[id],
+		}
+		for _, t := range v.Tags {
+			if aws.ToString(t.Key) == "Name" {
+				info.Name = aws.ToString(t.Value)
+			}
+		}
+		result = append(result, info)
+	}
+	return result, nil
+}
+
+// AdoptVPC returns VPCOutputs for an existing VPC the caller wants to reuse.
+// It collects the VPC's subnets (guessing public vs private by MapPublicIpOnLaunch)
+// and the first non-default security group, creating one if none exists.
+func AdoptVPC(ctx context.Context, cfg aws.Config, vpcID, namePrefix string) (*VPCOutputs, error) {
+	client := ec2.NewFromConfig(cfg)
+	subOut, err := client.DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{
+		Filters: []types.Filter{{Name: aws.String("vpc-id"), Values: []string{vpcID}}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("describing subnets for VPC %s: %w", vpcID, err)
+	}
+
+	var pub, priv []string
+	for _, s := range subOut.Subnets {
+		if aws.ToBool(s.MapPublicIpOnLaunch) {
+			pub = append(pub, aws.ToString(s.SubnetId))
+		} else {
+			priv = append(priv, aws.ToString(s.SubnetId))
+		}
+	}
+	// If the VPC has no subnets at all, fall back to using all as "public".
+	if len(pub) == 0 && len(priv) == 0 {
+		return nil, fmt.Errorf("VPC %s has no subnets — cannot adopt it for EKS", vpcID)
+	}
+
+	// Find or create a security group for EKS.
+	sgOut, err := client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{
+		Filters: []types.Filter{{Name: aws.String("vpc-id"), Values: []string{vpcID}}},
+	})
+	sgID := ""
+	if err == nil {
+		for _, sg := range sgOut.SecurityGroups {
+			if aws.ToString(sg.GroupName) != "default" {
+				sgID = aws.ToString(sg.GroupId)
+				break
+			}
+		}
+	}
+	if sgID == "" {
+		newSG, err := client.CreateSecurityGroup(ctx, &ec2.CreateSecurityGroupInput{
+			GroupName:   aws.String(namePrefix + "-eks-sg"),
+			Description: aws.String("bolt-managed EKS node security group"),
+			VpcId:       aws.String(vpcID),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("creating security group in adopted VPC: %w", err)
+		}
+		sgID = aws.ToString(newSG.GroupId)
+	}
+
+	return &VPCOutputs{
+		VPCID:            vpcID,
+		PublicSubnetIDs:  pub,
+		PrivateSubnetIDs: priv,
+		SecurityGroupID:  sgID,
+	}, nil
+}
 
 // VPCOutputs holds IDs of all VPC resources bolt created.
 type VPCOutputs struct {
@@ -40,15 +174,23 @@ func EnsureVPC(ctx context.Context, cfg aws.Config, namePrefix, region string, t
 	}
 
 	// Create VPC (10.0.0.0/16).
-	vpcOut, err := client.CreateVpc(ctx, &ec2.CreateVpcInput{
-		CidrBlock: aws.String("10.0.0.0/16"),
-		TagSpecifications: []types.TagSpecification{{
-			ResourceType: types.ResourceTypeVpc,
-			Tags:         ec2TagsFromMap(mergeTags(tags, map[string]string{"Name": namePrefix + "-vpc", "bolt:managed": "true"})),
-		}},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("creating VPC: %w", err)
+	var vpcOut *ec2.CreateVpcOutput
+	if createErr := errs.Do(ctx, 5, func() error {
+		var callErr error
+		vpcOut, callErr = client.CreateVpc(ctx, &ec2.CreateVpcInput{
+			CidrBlock: aws.String("10.0.0.0/16"),
+			TagSpecifications: []types.TagSpecification{{
+				ResourceType: types.ResourceTypeVpc,
+				Tags:         ec2TagsFromMap(mergeTags(tags, map[string]string{"Name": namePrefix + "-vpc", "bolt:managed": "true"})),
+			}},
+		})
+		return callErr
+	}, nil); createErr != nil {
+		var apiErr smithy.APIError
+		if errors.As(createErr, &apiErr) && apiErr.ErrorCode() == "VpcLimitExceeded" {
+			return nil, &VpcLimitExceededError{Config: cfg, Cause: createErr}
+		}
+		return nil, fmt.Errorf("creating VPC: %w", createErr)
 	}
 	vpcID := aws.ToString(vpcOut.Vpc.VpcId)
 
@@ -228,6 +370,175 @@ func mergeTags(base, extra map[string]string) map[string]string {
 		result[k] = v
 	}
 	return result
+}
+
+// VPCValidationError is returned by ValidateVPCForEKS when the chosen VPC
+// does not meet EKS requirements.  The cmd layer catches it to re-present
+// the VPC picker with the failure reason instead of dropping to the main menu.
+type VPCValidationError struct {
+	VPCID  string
+	Detail string
+	Cause  error
+}
+
+func (e *VPCValidationError) Error() string        { return e.Cause.Error() }
+func (e *VPCValidationError) Unwrap() error        { return e.Cause }
+func (e *VPCValidationError) Kind() errs.ErrorKind { return errs.KindConfig }
+func (e *VPCValidationError) Resource() string     { return "VPC" }
+
+// ValidateVPCForEKS checks whether an existing VPC has the capacity and
+// networking prerequisites to host an EKS cluster with nodeCount worker nodes.
+//
+// Checks performed:
+//   - At least 2 subnets exist and span at least 2 availability zones (EKS hard requirement)
+//   - Enough free IP addresses for EKS ENI pre-allocation (nodeCount×30 + 30 headroom)
+//   - An internet gateway is attached to the VPC (required for node image pulls)
+//   - Public subnets have a 0.0.0.0/0 route to that IGW
+//   - Private subnets (if any) have a 0.0.0.0/0 route to a NAT gateway
+func ValidateVPCForEKS(ctx context.Context, cfg aws.Config, vpcID string, out *VPCOutputs, nodeCount int) error {
+	client := ec2.NewFromConfig(cfg)
+
+	// vErr wraps a validation failure as a VPCValidationError so the cmd layer
+	// can loop back to the picker instead of dropping to the main menu.
+	vErr := func(msg string, args ...interface{}) error {
+		cause := fmt.Errorf(msg, args...)
+		return &VPCValidationError{VPCID: vpcID, Detail: cause.Error(), Cause: cause}
+	}
+
+	allSubnetIDs := append(out.PublicSubnetIDs, out.PrivateSubnetIDs...)
+	if len(allSubnetIDs) == 0 {
+		return vErr("VPC %s has no subnets — EKS requires at least 2 subnets in 2 different AZs", vpcID)
+	}
+
+	subOut, err := client.DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{
+		SubnetIds: allSubnetIDs,
+	})
+	if err != nil {
+		return fmt.Errorf("describing subnets for VPC %s: %w", vpcID, err)
+	}
+
+	// ── 1. AZ diversity ──────────────────────────────────────────────────────
+	azSet := map[string]struct{}{}
+	for _, s := range subOut.Subnets {
+		azSet[aws.ToString(s.AvailabilityZone)] = struct{}{}
+	}
+	if len(azSet) < 2 {
+		names := make([]string, 0, len(azSet))
+		for az := range azSet {
+			names = append(names, az)
+		}
+		return vErr("VPC %s subnets only span %d availability zone (%s); EKS requires at least 2 — "+
+			"add subnets in a second AZ or pick a different VPC", vpcID, len(azSet), names[0])
+	}
+
+	// ── 2. Free IP addresses ─────────────────────────────────────────────────
+	required := (nodeCount * 30) + 30
+	totalFree := 0
+	for _, s := range subOut.Subnets {
+		totalFree += int(aws.ToInt32(s.AvailableIpAddressCount))
+	}
+	if totalFree < required {
+		return vErr("VPC %s has only %d free IP addresses across all subnets; "+
+			"need at least %d for %d nodes (EKS ENI pre-allocation) — "+
+			"delete unused resources or pick a VPC with larger subnets",
+			vpcID, totalFree, required, nodeCount)
+	}
+
+	// ── 3. Internet Gateway attached ─────────────────────────────────────────
+	igwOut, err := client.DescribeInternetGateways(ctx, &ec2.DescribeInternetGatewaysInput{
+		Filters: []types.Filter{
+			{Name: aws.String("attachment.vpc-id"), Values: []string{vpcID}},
+			{Name: aws.String("attachment.state"), Values: []string{"available"}},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("checking internet gateway for VPC %s: %w", vpcID, err)
+	}
+	if len(igwOut.InternetGateways) == 0 {
+		return vErr("VPC %s has no internet gateway attached — "+
+			"EKS nodes need an IGW to pull container images; "+
+			"attach one or pick a VPC that already has one", vpcID)
+	}
+	igwID := aws.ToString(igwOut.InternetGateways[0].InternetGatewayId)
+
+	// ── 4. Route tables ───────────────────────────────────────────────────────
+	rtOut, err := client.DescribeRouteTables(ctx, &ec2.DescribeRouteTablesInput{
+		Filters: []types.Filter{
+			{Name: aws.String("vpc-id"), Values: []string{vpcID}},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("describing route tables for VPC %s: %w", vpcID, err)
+	}
+
+	subnetRT := map[string]*ec2RouteTable{}
+	var mainRT *ec2RouteTable
+	for i := range rtOut.RouteTables {
+		rt := &ec2RouteTable{routes: rtOut.RouteTables[i].Routes}
+		for _, assoc := range rtOut.RouteTables[i].Associations {
+			if aws.ToBool(assoc.Main) {
+				mainRT = rt
+			}
+			if assoc.SubnetId != nil {
+				subnetRT[aws.ToString(assoc.SubnetId)] = rt
+			}
+		}
+	}
+	resolveRT := func(subnetID string) *ec2RouteTable {
+		if rt, ok := subnetRT[subnetID]; ok {
+			return rt
+		}
+		return mainRT
+	}
+
+	for _, subID := range out.PublicSubnetIDs {
+		rt := resolveRT(subID)
+		if rt == nil || !rt.hasRoute("0.0.0.0/0", "igw-", igwID) {
+			return vErr("public subnet %s in VPC %s has no default route to internet gateway %s — "+
+				"nodes on this subnet will not be able to pull container images",
+				subID, vpcID, igwID)
+		}
+	}
+
+	for _, subID := range out.PrivateSubnetIDs {
+		rt := resolveRT(subID)
+		if rt == nil || !rt.hasNATRoute() {
+			return vErr("private subnet %s in VPC %s has no default route to a NAT gateway — "+
+				"EKS nodes on this subnet will not be able to reach AWS APIs",
+				subID, vpcID)
+		}
+	}
+
+	return nil
+}
+
+// ec2RouteTable is a thin wrapper so hasRoute / hasNATRoute stay readable.
+type ec2RouteTable struct {
+	routes []types.Route
+}
+
+func (rt *ec2RouteTable) hasRoute(cidr, gatewayPrefix, exactGatewayID string) bool {
+	for _, r := range rt.routes {
+		if aws.ToString(r.DestinationCidrBlock) != cidr {
+			continue
+		}
+		gw := aws.ToString(r.GatewayId)
+		if (gatewayPrefix != "" && contains(gw, gatewayPrefix)) ||
+			(exactGatewayID != "" && gw == exactGatewayID) {
+			return true
+		}
+	}
+	return false
+}
+
+func (rt *ec2RouteTable) hasNATRoute() bool {
+	for _, r := range rt.routes {
+		if aws.ToString(r.DestinationCidrBlock) == "0.0.0.0/0" &&
+			r.NatGatewayId != nil && aws.ToString(r.NatGatewayId) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func contains(s, substr string) bool {

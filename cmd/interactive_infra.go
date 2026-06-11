@@ -146,9 +146,34 @@ func interactiveInfraSource(backend string) (infra.ProvisionMode, infra.CloudPro
 }
 
 // interactiveAWSCredentials collects AWS credentials and validates them via STS.
+// If Doormat is available it is offered as the first (recommended) option.
 func interactiveAWSCredentials() (*preflight.AWSConfig, *preflight.AWSIdentity, error) {
-	var authMode string
+	// If doormat is installed, offer it upfront.
+	if preflight.DoormatAvailable() {
+		var source string
+		err := huh.NewForm(
+			huh.NewGroup(
+				huh.NewSelect[string]().
+					Title("How would you like to provide AWS credentials?").
+					Options(
+						huh.NewOption("  ⚡  Use Doormat  (recommended)", "doormat"),
+						huh.NewOption("  ✎  Enter credentials manually", "manual"),
+					).
+					Value(&source),
+			),
+		).WithTheme(boltTheme()).Run()
+		if errors.Is(err, huh.ErrUserAborted) {
+			return nil, nil, fmt.Errorf("cancelled")
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		if source == "doormat" {
+			return interactiveAWSViaDoormat()
+		}
+	}
 
+	var authMode string
 	err := huh.NewForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
@@ -239,6 +264,84 @@ func interactiveAWSCredentials() (*preflight.AWSConfig, *preflight.AWSIdentity, 
 	fmt.Println(lipgloss.NewStyle().Foreground(greenColor).Render("✓"))
 	fmt.Printf("  %s %s\n", labelStyle.Render("Account:"), identity.AccountID)
 	fmt.Printf("  %s %s\n\n", labelStyle.Render("ARN:"), identity.ARN)
+
+	return cfg, identity, nil
+}
+
+// interactiveAWSViaDoormat handles the Doormat-based AWS credential flow:
+// login (if needed) → role picker → region → short-lived credentials.
+func interactiveAWSViaDoormat() (*preflight.AWSConfig, *preflight.AWSIdentity, error) {
+	// Check if the doormat session is still valid; if not, run login.
+	if !preflight.DoormatSessionValid() {
+		fmt.Println()
+		fmt.Println(lipgloss.NewStyle().Foreground(tfeColor).Bold(true).Render("  ⚡  Starting Doormat login — your browser will open to authenticate."))
+		fmt.Println()
+		if err := preflight.DoormatLogin(); err != nil {
+			return nil, nil, err
+		}
+		fmt.Println()
+	}
+
+	// Fetch available roles.
+	fmt.Print(hintStyle.Render("  Fetching eligible roles from Doormat…  "))
+	roles, err := preflight.DoormatListRoles()
+	if err != nil {
+		fmt.Println(lipgloss.NewStyle().Foreground(redColor).Render("✗"))
+		return nil, nil, err
+	}
+	fmt.Println(lipgloss.NewStyle().Foreground(greenColor).Render("✓"))
+
+	// Build select options from role ARNs.
+	opts := make([]huh.Option[string], len(roles))
+	for i, arn := range roles {
+		opts[i] = huh.NewOption(preflight.DoormatRoleLabel(arn), arn)
+	}
+
+	var selectedRole, region string
+	err = huh.NewForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Which role would you like to use?").
+				Options(opts...).
+				Value(&selectedRole),
+		),
+		huh.NewGroup(
+			huh.NewInput().
+				Title("AWS Region").
+				Placeholder("us-east-1").
+				Value(&region).
+				Validate(notEmpty("AWS region")),
+		),
+	).WithTheme(boltTheme()).Run()
+
+	if errors.Is(err, huh.ErrUserAborted) {
+		return nil, nil, fmt.Errorf("cancelled")
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Retrieve credentials from Doormat.
+	fmt.Print("\n" + hintStyle.Render("  Retrieving credentials from Doormat…  "))
+	cfg, creds, err := preflight.DoormatGetCredentials(selectedRole, region)
+	if err != nil {
+		fmt.Println(lipgloss.NewStyle().Foreground(redColor).Render("✗"))
+		return nil, nil, err
+	}
+	fmt.Println(lipgloss.NewStyle().Foreground(greenColor).Render("✓"))
+
+	// Validate via STS to confirm identity.
+	fmt.Print(hintStyle.Render("  Validating credentials via STS…  "))
+	identity, err := preflight.ValidateAWSCredentials(cfg)
+	if err != nil {
+		fmt.Println(lipgloss.NewStyle().Foreground(redColor).Render("✗"))
+		return nil, nil, fmt.Errorf("AWS credential validation: %w", err)
+	}
+	fmt.Println(lipgloss.NewStyle().Foreground(greenColor).Render("✓"))
+	fmt.Printf("  %s %s\n", labelStyle.Render("Account:"), identity.AccountID)
+	fmt.Printf("  %s %s\n", labelStyle.Render("ARN:    "), identity.ARN)
+	fmt.Printf("  %s %s\n\n", labelStyle.Render("Expiry: "),
+		lipgloss.NewStyle().Foreground(cyanBright).Render(preflight.DoormatExpiresIn(creds.Expiration)))
 
 	return cfg, identity, nil
 }

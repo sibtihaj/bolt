@@ -51,6 +51,15 @@ type AWSCreds struct {
 	AccessKeyID     string
 	SecretAccessKey string
 	SessionToken    string
+	// ExistingVPCID skips VPC creation and adopts this VPC instead.
+	// Set by the VpcLimitExceeded auto-heal flow.
+	ExistingVPCID string
+	// ExistingEKSClusterName skips cluster creation and writes a kubeconfig for
+	// the named cluster instead.  Set by the EKSClusterExists heal flow.
+	ExistingEKSClusterName string
+	// S3BucketOverride overrides the default "{prefix}-tfe" bucket naming.
+	// Set by the S3NameConflict heal flow when auto-suffixing is exhausted.
+	S3BucketOverride string
 }
 
 // AzureCreds holds credential material for Azure.  Never persisted to disk.

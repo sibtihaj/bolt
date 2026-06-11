@@ -4,17 +4,31 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
-	"os"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	awsinfra "github.com/sibtihaj/bolt/app/infra/aws"
 	azureinfra "github.com/sibtihaj/bolt/app/infra/azure"
+	"github.com/sibtihaj/bolt/app/infra/errs"
 	gcpinfra "github.com/sibtihaj/bolt/app/infra/gcp"
 	k8sinfra "github.com/sibtihaj/bolt/app/infra/k8s"
 	"github.com/sibtihaj/bolt/app/preflight"
 	"github.com/sibtihaj/bolt/app/state"
 )
+
+// CredentialExpiredError is returned when any AWS call fails with an auth or
+// token-expiry error mid-provisioning.  The cmd layer uses it to trigger
+// re-authentication and retry.
+type CredentialExpiredError struct {
+	Cause error
+}
+
+func (e *CredentialExpiredError) Error() string        { return "AWS credentials expired: " + e.Cause.Error() }
+func (e *CredentialExpiredError) Unwrap() error        { return e.Cause }
+func (e *CredentialExpiredError) Kind() errs.ErrorKind { return errs.KindBadCredential }
+func (e *CredentialExpiredError) Resource() string     { return "AWS credentials" }
 
 // Provision runs full infrastructure provisioning based on cfg. It updates
 // infraState in-place with the ID of every resource it creates, so a partial
@@ -39,9 +53,21 @@ func Provision(ctx context.Context, cfg *InfraConfig, infraState *state.InfraSta
 	return nil, fmt.Errorf("unsupported cloud provider: %q", cfg.Cloud)
 }
 
+// promoteCredentialError wraps err in CredentialExpiredError if it is an AWS
+// auth or token-expiry failure.  All other errors pass through unchanged.
+// Call this on every error returned from provisioning steps.
+func promoteCredentialError(err error) error {
+	if err != nil && errs.IsCredentialError(err) {
+		return &CredentialExpiredError{Cause: err}
+	}
+	return err
+}
+
 // ── AWS ───────────────────────────────────────────────────────────────────────
 
 func provisionAWS(ctx context.Context, cfg *InfraConfig, infraState *state.InfraState, out *InfraOutputs) (*InfraOutputs, error) {
+	defer globalSpinner.stop() // safety net: stop spinner on any return path
+
 	awsCfg, err := preflight.BuildAWSConfig(ctx, &preflight.AWSConfig{
 		AssumeRoleARN:   cfg.AWS.AssumeRoleARN,
 		Region:          cfg.AWS.Region,
@@ -55,16 +81,32 @@ func provisionAWS(ctx context.Context, cfg *InfraConfig, infraState *state.Infra
 
 	// Phase 4 — full cluster provisioning (VPC + EKS).
 	if cfg.Mode == ProvisionAll {
-		step("Provisioning VPC…")
-		vpcOut, err := awsinfra.EnsureVPC(ctx, awsCfg, cfg.NamePrefix, cfg.AWS.Region, cfg.Tags)
-		if err != nil {
-			return nil, fmt.Errorf("VPC provisioning: %w", err)
+		var vpcOut *awsinfra.VPCOutputs
+		if cfg.AWS.ExistingVPCID != "" {
+			// Heal path: caller resolved a VpcLimitExceeded by picking an existing VPC.
+			step("Adopting existing VPC " + cfg.AWS.ExistingVPCID + "…")
+			vpcOut, err = awsinfra.AdoptVPC(ctx, awsCfg, cfg.AWS.ExistingVPCID, cfg.NamePrefix)
+			if err != nil {
+				return nil, promoteCredentialError(fmt.Errorf("VPC adoption: %w", err))
+			}
+			done("VPC adopted: " + vpcOut.VPCID)
+
+			step("Validating VPC capacity for EKS…")
+			if err = awsinfra.ValidateVPCForEKS(ctx, awsCfg, cfg.AWS.ExistingVPCID, vpcOut, cfg.Sizing.Nodes.NodeCount); err != nil {
+				return nil, fmt.Errorf("VPC capacity check: %w", err)
+			}
+			done("VPC capacity validated")
+		} else {
+			step("Provisioning VPC…")
+			vpcOut, err = awsinfra.EnsureVPC(ctx, awsCfg, cfg.NamePrefix, cfg.AWS.Region, cfg.Tags)
+			if err != nil {
+				return nil, promoteCredentialError(err)
+			}
+			done("VPC ready: " + vpcOut.VPCID)
 		}
 		infraState.VPCID = vpcOut.VPCID
 		infraState.SubnetIDs = append(vpcOut.PublicSubnetIDs, vpcOut.PrivateSubnetIDs...)
-		done("VPC ready: " + vpcOut.VPCID)
 
-		step("Provisioning EKS cluster  (≈15 min)…")
 		eksCfg := &awsinfra.EKSConfig{
 			ClusterName:      cfg.NamePrefix,
 			Region:           cfg.AWS.Region,
@@ -77,27 +119,76 @@ func provisionAWS(ctx context.Context, cfg *InfraConfig, infraState *state.Infra
 			NodeMaxCount:     int32(cfg.Sizing.Nodes.NodeCount + 2),
 			Tags:             cfg.Tags,
 		}
-		kubeconfigPath, err := awsinfra.EnsureEKSCluster(ctx, awsCfg, eksCfg)
-		if err != nil {
-			return nil, fmt.Errorf("EKS provisioning: %w", err)
+
+		var kubeconfigPath string
+		if cfg.AWS.ExistingEKSClusterName != "" {
+			// Explicit adopt chosen by heal handler — just write the kubeconfig.
+			step("Configuring access to existing EKS cluster " + cfg.AWS.ExistingEKSClusterName + "…")
+			kubeconfigPath, err = awsinfra.WriteEKSKubeconfig(ctx, awsCfg, cfg.AWS.ExistingEKSClusterName, cfg.AWS.Region)
+			if err != nil {
+				return nil, promoteCredentialError(err)
+			}
+			done("EKS cluster configured: " + cfg.AWS.ExistingEKSClusterName)
+			infraState.EKSClusterCreated = cfg.AWS.ExistingEKSClusterName
+		} else {
+			// Check whether a cluster with this name already exists.
+			detail, detailErr := awsinfra.GetEKSClusterDetail(ctx, awsCfg, eksCfg.ClusterName)
+			var clusterStepMsg string
+			if detailErr == nil {
+				if detail.Tags["bolt:deployment"] != eksCfg.ClusterName {
+					// External cluster — surface for interactive handling.
+					globalSpinner.stop()
+					return nil, &awsinfra.EKSClusterExistsError{
+						Config:      awsCfg,
+						ClusterName: eksCfg.ClusterName,
+						Status:      detail.Status,
+						Version:     detail.Version,
+					}
+				}
+				// Bolt-managed cluster from a prior run — adopt silently.
+				clusterStepMsg = fmt.Sprintf("Adopting bolt-managed EKS cluster %q (%s)…", eksCfg.ClusterName, detail.Status)
+			} else {
+				clusterStepMsg = "Provisioning EKS cluster  (≈15 min)…"
+			}
+
+			step(clusterStepMsg)
+			if err := liveWait(ctx, "EKS cluster "+eksCfg.ClusterName,
+				func() string {
+					sCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					return awsinfra.EKSClusterStatus(sCtx, awsCfg, eksCfg.ClusterName)
+				},
+				func() error {
+					var innerErr error
+					kubeconfigPath, innerErr = awsinfra.EnsureEKSCluster(ctx, awsCfg, eksCfg)
+					return innerErr
+				},
+			); err != nil {
+				return nil, promoteCredentialError(err)
+			}
+			infraState.EKSClusterCreated = cfg.NamePrefix
 		}
-		infraState.EKSClusterCreated = cfg.NamePrefix
 		out.KubeconfigPath = kubeconfigPath
-		done("EKS cluster ready: " + cfg.NamePrefix)
 	}
 
-	// Phase 2 — S3 bucket.
+	// Phase 2 — S3 bucket: auto-retry with letter suffixes on global name conflict.
+	desiredBucket := cfg.NamePrefix + "-tfe"
+	if infraState.S3BucketCreated != "" {
+		desiredBucket = infraState.S3BucketCreated // idempotent retry: reuse prior name
+	} else if cfg.AWS.S3BucketOverride != "" {
+		desiredBucket = cfg.AWS.S3BucketOverride
+	}
 	step("Provisioning S3 bucket…")
-	bucketName := cfg.NamePrefix + "-tfe"
-	if _, err := awsinfra.EnsureS3Bucket(ctx, awsCfg, bucketName, cfg.AWS.Region); err != nil {
-		return nil, fmt.Errorf("S3 provisioning: %w", err)
+	bucketName, s3Err := ensureS3BucketWithRetry(ctx, awsCfg, desiredBucket, cfg.AWS.Region)
+	if s3Err != nil {
+		return nil, promoteCredentialError(s3Err)
 	}
 	infraState.S3BucketCreated = bucketName
 	out.S3Bucket = bucketName
 	out.S3Region = cfg.AWS.Region
 	// Retrieve resolved credentials for S3 access keys.
-	resolvedCreds, err := awsCfg.Credentials.Retrieve(ctx)
-	if err == nil {
+	resolvedCreds, credErr := awsCfg.Credentials.Retrieve(ctx)
+	if credErr == nil {
 		out.S3AccessKeyID = resolvedCreds.AccessKeyID
 		out.S3SecretKey = resolvedCreds.SecretAccessKey
 	}
@@ -108,7 +199,6 @@ func provisionAWS(ctx context.Context, cfg *InfraConfig, infraState *state.Infra
 	switch cfg.Database {
 	case DBManaged:
 		// Phase 3 — RDS PostgreSQL.
-		step("Provisioning RDS PostgreSQL instance  (≈10 min)…")
 		rdsCfg := &awsinfra.RDSConfig{
 			InstanceID:    cfg.NamePrefix + "-db",
 			InstanceClass: cfg.Sizing.DBClass,
@@ -122,13 +212,24 @@ func provisionAWS(ctx context.Context, cfg *InfraConfig, infraState *state.Infra
 		if len(infraState.SubnetIDs) > 0 {
 			rdsCfg.VPCSecurityGroupIDs = []string{} // filled if VPC was provisioned
 		}
-		dbURL, err := awsinfra.EnsureRDSPostgres(ctx, awsCfg, rdsCfg)
-		if err != nil {
-			return nil, fmt.Errorf("RDS provisioning: %w", err)
+		step("Provisioning RDS PostgreSQL instance  (≈10 min)…")
+		var dbURL string
+		if err := liveWait(ctx, "RDS instance "+rdsCfg.InstanceID,
+			func() string {
+				sCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				return awsinfra.RDSInstanceStatus(sCtx, awsCfg, rdsCfg.InstanceID)
+			},
+			func() error {
+				var innerErr error
+				dbURL, innerErr = awsinfra.EnsureRDSPostgres(ctx, awsCfg, rdsCfg)
+				return innerErr
+			},
+		); err != nil {
+			return nil, promoteCredentialError(err)
 		}
 		infraState.RDSInstanceID = rdsCfg.InstanceID
 		out.DatabaseURL = dbURL
-		done("RDS instance ready: " + rdsCfg.InstanceID)
 
 	case DBInCluster:
 		// Phase 2 — in-cluster PostgreSQL StatefulSet.
@@ -152,6 +253,8 @@ func provisionAWS(ctx context.Context, cfg *InfraConfig, infraState *state.Infra
 // ── Azure ─────────────────────────────────────────────────────────────────────
 
 func provisionAzure(ctx context.Context, cfg *InfraConfig, infraState *state.InfraState, out *InfraOutputs) (*InfraOutputs, error) {
+	defer globalSpinner.stop()
+
 	step("Obtaining Azure access token…")
 	token, err := preflight.GetAzureToken(ctx, &preflight.AzureConfig{
 		TenantID:       cfg.Azure.TenantID,
@@ -186,7 +289,6 @@ func provisionAzure(ctx context.Context, cfg *InfraConfig, infraState *state.Inf
 	infraState.AzureStorageAccount = storageAccount
 	out.S3Bucket = containerName
 	out.S3Endpoint = endpoint
-	// Azure Blob S3-compat: account name as access key, storage key as secret
 	out.S3AccessKeyID = storageAccount
 	out.S3SecretKey = accessKey
 	out.S3Region = cfg.Azure.Location
@@ -239,6 +341,8 @@ func provisionAzure(ctx context.Context, cfg *InfraConfig, infraState *state.Inf
 // ── GCP ───────────────────────────────────────────────────────────────────────
 
 func provisionGCP(ctx context.Context, cfg *InfraConfig, infraState *state.InfraState, out *InfraOutputs) (*InfraOutputs, error) {
+	defer globalSpinner.stop()
+
 	step("Obtaining GCP access token…")
 	token, err := preflight.GetGCPToken(ctx, cfg.GCP.ServiceAcctJSON)
 	if err != nil {
@@ -259,8 +363,6 @@ func provisionGCP(ctx context.Context, cfg *InfraConfig, infraState *state.Infra
 		return nil, fmt.Errorf("GCS bucket: %w", err)
 	}
 	infraState.GCSBucketCreated = bucketName
-	// TFE uses S3-compat params; for GCP we use HMAC keys (wired in Phase 3+).
-	// For now pass the GCS JSON endpoint; TFE's GCS storage type will be used.
 	out.S3Bucket = bucketName
 	out.S3Region = cfg.GCP.Region
 	out.S3Endpoint = "https://storage.googleapis.com"
@@ -311,12 +413,87 @@ func provisionGCP(ctx context.Context, cfg *InfraConfig, infraState *state.Infra
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-func step(msg string) {
-	fmt.Fprintf(os.Stdout, "  ⋯  %s\n", msg)
+func step(msg string) { globalSpinner.start(msg) }
+func done(msg string) { globalSpinner.success(msg) }
+
+// liveWait runs opFn in a background goroutine while printing a status update
+// every 60 seconds until it completes.  statusFn (may be nil) is called each
+// tick to fetch the actual AWS resource status shown to the user.  On success
+// it prints the elapsed time via the spinner; on failure it stops the spinner
+// and returns the error.
+func liveWait(ctx context.Context, label string, statusFn func() string, opFn func() error) error {
+	type result struct{ err error }
+	resultCh := make(chan result, 1)
+	go func() { resultCh <- result{opFn()} }()
+
+	reassurances := []string{
+		"I'm alive and working on your behalf ⚡",
+		"Haven't frozen — AWS is building your infrastructure",
+		"Still working, hang tight ☕",
+		"Good things take time — almost there",
+		"AWS is processing your request 🔧",
+		"I'm here, just waiting on AWS ⏳",
+		"Progress is being made, trust the process ✨",
+		"Cloud resources take a moment to warm up ☁️",
+	}
+	msgIdx := 0
+	start := time.Now()
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case r := <-resultCh:
+			elapsed := time.Since(start).Round(time.Second)
+			if r.err == nil {
+				globalSpinner.success(fmt.Sprintf("%s complete  (%s)", label, elapsed))
+			} else {
+				globalSpinner.stop()
+			}
+			return r.err
+		case <-ticker.C:
+			elapsed := time.Since(start).Round(time.Second)
+			msg := reassurances[msgIdx%len(reassurances)]
+			msgIdx++
+			if statusFn != nil {
+				status := statusFn()
+				globalSpinner.info(fmt.Sprintf("  ⋯  %s — AWS status: %s  [%s elapsed]\n     %s", label, status, elapsed, msg))
+			} else {
+				globalSpinner.info(fmt.Sprintf("  ⋯  %s — still in progress  [%s elapsed]\n     %s", label, elapsed, msg))
+			}
+		}
+	}
 }
 
-func done(msg string) {
-	fmt.Fprintf(os.Stdout, "  ✓  %s\n", msg)
+// ensureS3BucketWithRetry creates desired bucket, and if the global name is
+// already taken by another account, retries with single-letter suffixes (-a …
+// -z).  Returns the name of the bucket actually created.  If all 26 variants
+// are also taken it returns the last S3NameConflictError for the cmd layer to
+// handle interactively.
+func ensureS3BucketWithRetry(ctx context.Context, cfg aws.Config, desired, region string) (string, error) {
+	_, err := awsinfra.EnsureS3Bucket(ctx, cfg, desired, region)
+	if err == nil {
+		return desired, nil
+	}
+	var conflict *awsinfra.S3NameConflictError
+	if !errors.As(err, &conflict) {
+		return "", err
+	}
+
+	prev := desired
+	for c := 'a'; c <= 'z'; c++ {
+		name := desired + "-" + string(c)
+		globalSpinner.info(fmt.Sprintf("  !  Bucket %q is globally taken — trying %q", prev, name))
+		prev = name
+		_, err = awsinfra.EnsureS3Bucket(ctx, cfg, name, region)
+		if err == nil {
+			return name, nil
+		}
+		if !errors.As(err, &conflict) {
+			return "", err
+		}
+	}
+	return "", err // all variants taken — propagate to interactive heal handler
 }
 
 // generatePassword creates a cryptographically random, URL-safe password of
@@ -326,7 +503,6 @@ func generatePassword(n int) string {
 	if _, err := rand.Read(b); err != nil {
 		panic("crypto/rand unavailable: " + err.Error())
 	}
-	// base64 URL-safe, no padding — trim to requested length
 	s := base64.RawURLEncoding.EncodeToString(b)
 	if len(s) > n {
 		s = s[:n]
@@ -350,8 +526,6 @@ func sanitizeStorageAccount(prefix string) string {
 }
 
 func gcpRegionToLocation(region string) string {
-	// GCS uses multi-region location strings like "US", "EU", "ASIA"
-	// for single regions use the region directly.
 	return region
 }
 

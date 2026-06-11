@@ -17,6 +17,7 @@ bolt ships with two modes of operation:
 - [Operational Modes](#operational-modes)
 - [Credential Resolution](#credential-resolution)
 - [Cloud Provider Credentials](#cloud-provider-credentials)
+- [Auto-Healing & Resilience](#auto-healing--resilience)
 - [Commands](#commands)
   - [deploy k8s](#deploy-k8s)
   - [deploy docker](#deploy-docker)
@@ -140,7 +141,7 @@ When a newer version of bolt is available, an amber notice is displayed when you
 
 ```
   ╭──────────────────────────────────────────────────────────────╮
-  │  ⚡  A new version of bolt is available: v0.2.0              │
+  │  ⚡  A new version of bolt is available: v0.3.0              │
   │                                                              │
   │  Upgrade:        brew upgrade sibtihaj/tap/bolt              │
   │  Release notes:  https://github.com/sibtihaj/bolt/releases…  │
@@ -271,6 +272,7 @@ bolt does **not** require cloud provider credentials as flags. It inherits whate
 | Azure interactive login | `az login` before running bolt |
 | GCP service account | `export GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa-key.json` |
 | GCP interactive login | `gcloud auth application-default login` before running bolt |
+| **Doormat SSO** | Select "Doormat" in the interactive credential wizard; bolt runs `doormat login` automatically when the session is stale |
 
 **Verify credentials before deploying:**
 
@@ -279,6 +281,54 @@ aws sts get-caller-identity   # AWS
 az account show               # Azure
 gcloud auth list              # GCP
 ```
+
+---
+
+## Auto-Healing & Resilience
+
+bolt detects common provisioning failures and resolves them without requiring you to exit, fix, and rerun. Every heal handler loops until the deployment succeeds or you explicitly cancel.
+
+### Animated spinner
+
+A braille `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` spinner runs during every blocking operation so you always know the CLI is working.  On non-TTY outputs (CI, piped) it falls back to plain `⋯` lines.
+
+### Live progress for long operations
+
+EKS cluster provisioning (~15 min) and RDS instance creation (~10 min) print a real-time status line every 60 seconds, fetching actual state from the AWS API:
+
+```
+  ⠙  Provisioning EKS cluster (≈15 min)…
+  ⋯  EKS cluster bolt-prod — AWS status: CREATING  [2m0s elapsed]
+     Haven't frozen — AWS is building your infrastructure
+  ⋯  EKS cluster bolt-prod — AWS status: CREATING  [4m0s elapsed]
+     Still working, hang tight ☕
+  ✓  EKS cluster bolt-prod complete  (14m32s)
+```
+
+### Automatic S3 bucket conflict recovery
+
+S3 bucket names are globally unique.  When `{prefix}-tfe` is taken, bolt silently tries `{prefix}-tfe-a`, `-b`, … up to `-z` with no user interaction.  If all 26 are also taken, an interactive prompt appears.
+
+### VPC limit & adoption
+
+When the VPC quota is reached, bolt lists existing VPCs and offers:
+- **Use this VPC** — bolt validates AZ diversity, free IP capacity, IGW, and route tables before wiring the deployment into it.  If the VPC fails validation the picker re-appears with the specific reason shown.
+- **Delete this VPC** — frees a slot and retries creation.
+
+### EKS cluster conflict detection
+
+Before creating a cluster, bolt checks whether one with the same name already exists.  Bolt-owned clusters (tagged `bolt:deployment`) are adopted silently on retry.  External clusters trigger a prompt:
+- **Deploy on existing cluster** — writes a kubeconfig and proceeds.
+- **Destroy and provision fresh** — deletes the cluster (with a spinner) then reprovisioned.
+
+### Quota & capacity failures
+
+| Failure | What bolt does |
+|---|---|
+| EKS cluster quota | Lists clusters; lets you delete one to free a slot |
+| RDS instance quota | Lists instances; lets you delete one to free a slot |
+| RDS capacity unavailable | Suggests equivalent instance classes (`db.r6g.large`, `db.t3.large`, etc.); loops if the chosen class is also full |
+| AWS credentials expired | Re-prompts for credentials (static keys or Doormat SSO); resumes from the last successful step |
 
 ---
 
@@ -495,6 +545,8 @@ bolt/
 │   ├── root.go                    # Root command — launches TUI when called with no args
 │   ├── interactive.go             # TUI: banner, main menu loop, list/status/destroy views
 │   ├── interactive_deploy.go      # TUI: guided deploy wizards (K8s + Docker)
+│   ├── interactive_infra.go       # TUI: cloud credential & infra wizards
+│   ├── heal_aws.go                # Auto-heal handlers for AWS provisioning errors
 │   ├── deploy.go                  # 'deploy' parent command
 │   ├── deploy_k8s.go              # 'deploy k8s' flags and RunE
 │   ├── deploy_docker.go           # 'deploy docker' flags and RunE
@@ -522,6 +574,19 @@ bolt/
     │
     ├── update/
     │   └── check.go               # Background GitHub release check; respects BOLT_NO_UPDATE_CHECK
+    │
+    ├── preflight/
+    │   ├── aws.go                 # AWS credential validation + STS caller identity
+    │   ├── azure.go               # Azure OAuth2 token acquisition
+    │   ├── gcp.go                 # GCP service-account JWT grant
+    │   └── doormat.go             # Doormat SSO wrappers (HashiCorp internal)
+    │
+    ├── infra/
+    │   ├── types.go               # InfraConfig, AWSCreds, AzureCreds, GCPCreds, InfraOutputs
+    │   ├── orchestrator.go        # Provision() dispatcher + step/done/liveWait helpers
+    │   ├── spinner.go             # Thread-safe braille spinner with TTY detection
+    │   ├── errs/                  # ErrorKind taxonomy, AWS classifier, retry.Do()
+    │   └── aws/                   # AWS provisioners: VPC, EKS, RDS, S3, destroy
     │
     ├── tls/
     │   └── selfsigned.go

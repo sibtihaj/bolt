@@ -366,7 +366,10 @@ func interactiveDeployK8s() error {
 
 		outputs, err := infra.Provision(context.Background(), infraCfg, infraStateRec)
 		if err != nil {
-			return fmt.Errorf("infrastructure provisioning failed: %w", err)
+			outputs, err = handleAWSProvisionError(context.Background(), err, infraCfg, infraStateRec)
+			if err != nil {
+				return fmt.Errorf("infrastructure provisioning failed: %w", err)
+			}
 		}
 
 		// Merge provisioned outputs into credentials and deployment.
@@ -460,6 +463,7 @@ func buildInfraConfig(r *InfraWizardResult, deploymentName string) *infra.InfraC
 	}
 	return cfg
 }
+
 
 // ── Docker deploy wizard ───────────────────────────────────────────────────────
 //
