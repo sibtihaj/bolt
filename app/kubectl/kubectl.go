@@ -1,6 +1,7 @@
 package kubectl
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 
@@ -17,21 +18,19 @@ func args(d *state.TFEDeployment, extra ...string) []string {
 }
 
 func env(d *state.TFEDeployment) []string {
+	var e []string
 	if d.Kubeconfig != "" {
-		return []string{"KUBECONFIG=" + d.Kubeconfig}
+		e = append(e, "KUBECONFIG="+d.Kubeconfig)
 	}
-	return nil
+	e = append(e, d.ExtraEnv...)
+	return e
 }
 
 // CheckPrereqs verifies kubectl is on PATH.
 func CheckPrereqs() error {
-	out, err := runner.Output("kubectl", []string{"version", "--client", "--short"}, runner.RunOptions{})
+	out, err := runner.Output("kubectl", []string{"version", "--client"}, runner.RunOptions{})
 	if err != nil {
-		// --short was deprecated in 1.28; try without it
-		out, err = runner.Output("kubectl", []string{"version", "--client"}, runner.RunOptions{})
-		if err != nil {
-			return fmt.Errorf("kubectl not found — install it from https://kubernetes.io/docs/tasks/tools/: %w", err)
-		}
+		return fmt.Errorf("kubectl not found — install it from https://kubernetes.io/docs/tasks/tools/: %w", err)
 	}
 	fmt.Printf("kubectl: %s\n", strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0])
 	return nil
@@ -39,9 +38,10 @@ func CheckPrereqs() error {
 
 // CreateNamespace creates the namespace, silently ignoring "already exists".
 func CreateNamespace(d *state.TFEDeployment) error {
+	var stderr bytes.Buffer
 	a := args(d, "create", "namespace", d.Namespace)
-	err := runner.Run("kubectl", a, runner.RunOptions{Env: env(d)})
-	if err != nil && strings.Contains(err.Error(), "already exists") {
+	err := runner.Run("kubectl", a, runner.RunOptions{Env: env(d), StderrCapture: &stderr})
+	if err != nil && strings.Contains(stderr.String(), "AlreadyExists") {
 		return nil
 	}
 	return err
@@ -89,6 +89,27 @@ func UpsertTLSSecret(d *state.TFEDeployment, secretName, certPath, keyPath strin
 		"--key", keyPath,
 	)
 	return runner.Run("kubectl", createArgs, runner.RunOptions{Env: env(d)})
+}
+
+// UpsertImagePullSecret creates (or recreates) a docker-registry secret used to
+// pull TFE images from images.releases.hashicorp.com.
+func UpsertImagePullSecret(d *state.TFEDeployment, secretName, username, password string) error {
+	delArgs := args(d, "delete", "secret", secretName,
+		"--namespace", d.Namespace, "--ignore-not-found")
+	if err := runner.Run("kubectl", delArgs, runner.RunOptions{Env: env(d)}); err != nil {
+		return fmt.Errorf("delete secret %s: %w", secretName, err)
+	}
+	createArgs := args(d,
+		"create", "secret", "docker-registry", secretName,
+		"--namespace", d.Namespace,
+		"--docker-server=images.releases.hashicorp.com",
+		"--docker-username="+username,
+		"--docker-password="+password,
+	)
+	if err := runner.Run("kubectl", createArgs, runner.RunOptions{Env: env(d)}); err != nil {
+		return fmt.Errorf("create image pull secret %s: %w", secretName, err)
+	}
+	return nil
 }
 
 // GetPods prints the pods in the TFE namespace to stdout.

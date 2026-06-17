@@ -14,10 +14,12 @@ import (
 // EnsureKindCluster creates a kind cluster named bolt-<namePrefix> and writes
 // its kubeconfig to ~/.bolt/kubeconfigs/<namePrefix>.yaml.
 // Returns the kubeconfig path. Idempotent — reuses the cluster if it already exists.
-func EnsureKindCluster(namePrefix string) (string, error) {
+// When prompt is true (interactive TUI flow), the user is asked before installing kind.
+// When prompt is false (non-interactive CLI), kind is installed automatically.
+func EnsureKindCluster(namePrefix string, prompt bool) (string, error) {
 	clusterName := "bolt-" + namePrefix
 
-	if err := checkKindPrereqs(); err != nil {
+	if err := checkKindPrereqs(prompt); err != nil {
 		return "", err
 	}
 
@@ -72,29 +74,37 @@ func DeleteKindCluster(namePrefix string) error {
 	return runner.Run("kind", []string{"delete", "cluster", "--name", clusterName}, runner.RunOptions{})
 }
 
-func checkKindPrereqs() error {
+func checkKindPrereqs(prompt bool) error {
 	if _, err := runner.Output("docker", []string{"info"}, runner.RunOptions{}); err != nil {
 		return fmt.Errorf("Docker is not running — start Docker Desktop and retry")
 	}
 	if _, err := runner.Output("kind", []string{"version"}, runner.RunOptions{}); err != nil {
-		return installKind()
+		return installKind(prompt)
 	}
 	return nil
 }
 
-func installKind() error {
-	fmt.Print("  kind is not installed. Install it now? [y/N] ")
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Scan()
-	answer := strings.TrimSpace(strings.ToLower(scanner.Text()))
-	if answer != "y" && answer != "yes" {
-		return fmt.Errorf("kind not found — install it from https://kind.sigs.k8s.io/docs/user/quick-start/#installation")
+func installKind(prompt bool) error {
+	if prompt {
+		fmt.Print("  kind is not installed. Install it now? [y/N] ")
+		scanner := bufio.NewScanner(os.Stdin)
+		scanner.Scan()
+		answer := strings.TrimSpace(strings.ToLower(scanner.Text()))
+		if answer != "y" && answer != "yes" {
+			return fmt.Errorf("kind not found — install it from https://kind.sigs.k8s.io/docs/user/quick-start/#installation")
+		}
+	} else {
+		fmt.Println("  kind is not installed — installing automatically…")
 	}
 
 	switch runtime.GOOS {
 	case "darwin":
+		brew := "/opt/homebrew/bin/brew"
+		if _, statErr := os.Stat(brew); statErr != nil {
+			brew = "/usr/local/bin/brew" // Intel Mac fallback
+		}
 		fmt.Println("  Running: brew install kind")
-		if err := runner.Run("brew", []string{"install", "kind"}, runner.RunOptions{
+		if err := runner.Run(brew, []string{"install", "kind"}, runner.RunOptions{
 			Stdout: os.Stdout,
 			Stderr: os.Stderr,
 		}); err != nil {

@@ -10,10 +10,12 @@ import (
 	"time"
 
 	"github.com/charmbracelet/huh"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/sibtihaj/bolt/app/credentials"
 	"github.com/sibtihaj/bolt/app/infra"
 	"github.com/sibtihaj/bolt/app/state"
 	"github.com/sibtihaj/bolt/app/tfe"
+	apptls "github.com/sibtihaj/bolt/app/tls"
 )
 
 // interactiveDeploy asks which backend then routes to the right wizard.
@@ -97,7 +99,7 @@ func interactiveDeployK8s() error {
 	var (
 		clusterType string
 		namespace   = "tfe"
-		hostname    string
+		hostname    = os.Getenv("TFE_HOSTNAME")
 		mode        = "disk"
 		generateTLS bool
 
@@ -110,17 +112,17 @@ func interactiveDeployK8s() error {
 		gkeProject       string
 		kubeconfig       string
 
-		license            string
-		encryptionPassword string
+		license            = os.Getenv("TFE_LICENSE")
+		encryptionPassword = os.Getenv("TFE_ENCRYPTION_PASSWORD")
 		tlsCertPath        string
 		tlsKeyPath         string
 
-		databaseURL       string
-		s3Bucket          string
-		s3Region          string
-		s3AccessKeyID     string
-		s3SecretAccessKey string
-		redisURL          string
+		databaseURL       = os.Getenv("TFE_DATABASE_URL")
+		s3Bucket          = os.Getenv("TFE_S3_BUCKET")
+		s3Region          = os.Getenv("TFE_S3_REGION")
+		s3AccessKeyID     = os.Getenv("TFE_S3_ACCESS_KEY_ID")
+		s3SecretAccessKey = os.Getenv("TFE_S3_SECRET_ACCESS_KEY")
+		redisURL          = os.Getenv("TFE_REDIS_URL")
 	)
 
 	// Pre-select cluster type from infra wizard cloud choice.
@@ -131,6 +133,12 @@ func interactiveDeployK8s() error {
 		clusterType = "aks"
 	case infra.CloudGCP:
 		clusterType = "gke"
+	case infra.CloudLocal:
+		if infraResult.LocalCreds != nil && infraResult.LocalCreds.SubType == infra.LocalKubeadm {
+			clusterType = "kubeadm"
+		} else {
+			clusterType = "kind"
+		}
 	}
 
 	// If bolt provisioned storage, default to external mode.
@@ -148,6 +156,7 @@ func interactiveDeployK8s() error {
 					huh.NewOption("AKS  — Azure Kubernetes Service", "aks"),
 					huh.NewOption("GKE  — Google Kubernetes Engine", "gke"),
 					huh.NewOption("kubeadm  — self-managed cluster", "kubeadm"),
+					huh.NewOption("kind  — local Docker cluster", "kind"),
 				).
 				Value(&clusterType),
 			huh.NewInput().
@@ -286,6 +295,8 @@ func interactiveDeployK8s() error {
 		return err
 	}
 
+	hostname = normalizeHostname(hostname)
+
 	if namespace == "" {
 		namespace = "tfe"
 	}
@@ -296,6 +307,13 @@ func interactiveDeployK8s() error {
 		tlsDir := filepath.Join(home, ".bolt", "tls", name)
 		tlsCertPath = filepath.Join(tlsDir, "tfe.crt")
 		tlsKeyPath = filepath.Join(tlsDir, "tfe.key")
+		if _, statErr := os.Stat(tlsCertPath); os.IsNotExist(statErr) {
+			fmt.Print("\n" + hintStyle.Render("  Generating self-signed TLS certificate…  "))
+			if err := apptls.GenerateSelfSignedCert(hostname, tlsCertPath, tlsKeyPath); err != nil {
+				return fmt.Errorf("generate TLS cert: %w", err)
+			}
+			fmt.Println(lipgloss.NewStyle().Foreground(greenColor).Render("✓"))
+		}
 	}
 
 	resolvedKubeconfig := ""
@@ -364,12 +382,45 @@ func interactiveDeployK8s() error {
 		fmt.Println(hintStyle.Render("  This may take 15–30 minutes for a full cluster provisioning."))
 		fmt.Println()
 
-		outputs, err := infra.Provision(context.Background(), infraCfg, infraStateRec)
-		if err != nil {
-			outputs, err = handleAWSProvisionError(context.Background(), err, infraCfg, infraStateRec)
-			if err != nil {
-				return fmt.Errorf("infrastructure provisioning failed: %w", err)
+		var outputs *infra.InfraOutputs
+		for {
+			var provErr error
+			outputs, provErr = infra.Provision(context.Background(), infraCfg, infraStateRec)
+			if provErr != nil {
+				outputs, provErr = handleAWSProvisionError(context.Background(), provErr, infraCfg, infraStateRec)
 			}
+			if provErr == nil {
+				break
+			}
+
+			fmt.Println()
+			fmt.Println(errorBoxStyle.Render("  ✗  " + provErr.Error()))
+			fmt.Println()
+			fmt.Println(lipgloss.NewStyle().Bold(true).Foreground(amberColor).Render("  Suggestion:"))
+			fmt.Println(hintStyle.Render("  " + infraHint(provErr)))
+			fmt.Println()
+
+			var choice string
+			formErr := huh.NewForm(
+				huh.NewGroup(
+					huh.NewSelect[string]().
+						Title("What would you like to do?").
+						Description("Already-completed steps are skipped on retry.").
+						Options(
+							huh.NewOption("  ↺  Retry  (after fixing the issue above)", "retry"),
+							huh.NewOption("  ✕  Abort  (return to main menu)", "abort"),
+						).
+						Value(&choice),
+				),
+			).WithTheme(boltTheme()).Run()
+
+			if errors.Is(formErr, huh.ErrUserAborted) || choice == "abort" {
+				return fmt.Errorf("infrastructure provisioning failed: %w", provErr)
+			}
+			if formErr != nil {
+				return formErr
+			}
+			// choice == "retry" — loop
 		}
 
 		// Merge provisioned outputs into credentials and deployment.
@@ -395,6 +446,32 @@ func interactiveDeployK8s() error {
 			d.Kubeconfig = resolvedKubeconfig
 		}
 
+		// For local kubeadm clusters, persist SSH connection details so destroy can reach the host.
+		if infraResult.Cloud == infra.CloudLocal && infraResult.LocalCreds != nil &&
+			infraResult.LocalCreds.SubType == infra.LocalKubeadm {
+			d.SSHHost = infraResult.LocalCreds.SSHHost
+			d.SSHUser = infraResult.LocalCreds.SSHUser
+			d.SSHKeyPath = infraResult.LocalCreds.SSHKeyPath
+		}
+
+		// For EKS clusters, propagate the AWS credentials bolt used for provisioning
+		// into the kubectl subprocess environment so aws-eks-get-token can authenticate.
+		if infraResult.Cloud == infra.CloudAWS && infraResult.AWSCreds != nil {
+			awsCreds := infraResult.AWSCreds
+			if awsCreds.AccessKeyID != "" {
+				d.ExtraEnv = append(d.ExtraEnv,
+					"AWS_ACCESS_KEY_ID="+awsCreds.AccessKeyID,
+					"AWS_SECRET_ACCESS_KEY="+awsCreds.SecretAccessKey,
+				)
+				if awsCreds.SessionToken != "" {
+					d.ExtraEnv = append(d.ExtraEnv, "AWS_SESSION_TOKEN="+awsCreds.SessionToken)
+				}
+				if awsCreds.Region != "" {
+					d.ExtraEnv = append(d.ExtraEnv, "AWS_DEFAULT_REGION="+awsCreds.Region)
+				}
+			}
+		}
+
 		showProvisionedCredentials(name, outputs)
 	}
 
@@ -415,7 +492,162 @@ func interactiveDeployK8s() error {
 	if err != nil {
 		return err
 	}
-	return p.Deploy(creds)
+	return deployWithRetry(p, d, creds)
+}
+
+// deployWithRetry runs p.Deploy and, on failure, shows a Retry / Abort picker
+// so the user can fix a transient problem (expired token, missing file, etc.)
+// and continue without losing the whole wizard flow. The provisioner operations
+// are idempotent — already-created resources are detected and skipped on retry.
+func deployWithRetry(p tfe.Provisioner, d *state.TFEDeployment, creds *credentials.TFECredentials) error {
+	for {
+		deployErr := p.Deploy(creds)
+		if deployErr == nil {
+			return nil
+		}
+
+		fmt.Println()
+		fmt.Println(errorBoxStyle.Render("  ✗  " + deployErr.Error()))
+		fmt.Println()
+
+		suggestion := deployHint(deployErr)
+		fmt.Println(lipgloss.NewStyle().Bold(true).Foreground(amberColor).Render("  Suggestion:"))
+		fmt.Println(hintStyle.Render("  " + suggestion))
+		fmt.Println()
+
+		var choice string
+		formErr := huh.NewForm(
+			huh.NewGroup(
+				huh.NewSelect[string]().
+					Title("What would you like to do?").
+					Description("Already-completed steps are skipped on retry.").
+					Options(
+						huh.NewOption("  ↺  Retry  (after fixing the issue above)", "retry"),
+						huh.NewOption("  ✕  Abort  (return to main menu)", "abort"),
+					).
+					Value(&choice),
+			),
+		).WithTheme(boltTheme()).Run()
+
+		if errors.Is(formErr, huh.ErrUserAborted) || choice == "abort" {
+			return deployErr
+		}
+		if formErr != nil {
+			return formErr
+		}
+		// choice == "retry" — loop
+	}
+}
+
+// deployHint returns a human-readable suggestion based on the failing step.
+func deployHint(err error) string {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "create TLS secret") || strings.Contains(msg, "tls-tls") ||
+		strings.Contains(msg, "tfe.crt") || strings.Contains(msg, "tfe.key"):
+		return "The TLS certificate or key file could not be read. Ensure the paths exist:\n" +
+			"    bolt generates them automatically when 'Generate self-signed TLS' is selected.\n" +
+			"    Or provide your own cert/key files and retry."
+
+	case strings.Contains(msg, "create namespace"):
+		return "Namespace creation failed. If it already exists in the cluster that is fine — retry\n" +
+			"    and bolt will skip it. Otherwise check cluster connectivity:\n" +
+			"    kubectl get namespaces --kubeconfig ~/.bolt/kubeconfigs/<name>.yaml"
+
+	case strings.Contains(msg, "Unauthorized") || strings.Contains(msg, "unauthorized"):
+		return "Your cloud credentials have expired. Refresh them and retry:\n" +
+			"    AWS/EKS — re-authenticate via Doormat or export fresh AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY\n" +
+			"    Azure   — run: az login\n" +
+			"    GCP     — run: gcloud auth application-default login"
+
+	case strings.Contains(msg, "kubeconfig") || strings.Contains(msg, "no such host") ||
+		strings.Contains(msg, "connection refused") || strings.Contains(msg, "unable to connect"):
+		return "Cannot reach the cluster API server. Check:\n" +
+			"    1. Your VPN / network is connected.\n" +
+			"    2. The kubeconfig at ~/.bolt/kubeconfigs/<name>.yaml is valid.\n" +
+			"    3. kubectl get nodes --kubeconfig ~/.bolt/kubeconfigs/<name>.yaml"
+
+	case strings.Contains(msg, "helm install") || strings.Contains(msg, "helm upgrade"):
+		return "Helm install failed — TFE pods may be in a bad state. Check:\n" +
+			"    kubectl get pods -n tfe\n" +
+			"    kubectl describe pod -n tfe <pod-name>\n" +
+			"    kubectl logs -n tfe -l app.kubernetes.io/name=terraform-enterprise"
+
+	case strings.Contains(msg, "ImagePull") || strings.Contains(msg, "ErrImagePull") ||
+		strings.Contains(msg, "image"):
+		return "Cannot pull the TFE container image. Verify:\n" +
+			"    1. The image tag is correct (check https://releases.hashicorp.com/terraform-enterprise).\n" +
+			"    2. Your cluster nodes can reach images.releases.hashicorp.com."
+
+	case strings.Contains(msg, "Forbidden") || strings.Contains(msg, "forbidden"):
+		return "Permission denied. Ensure the credentials you provided have the required RBAC\n" +
+			"    permissions to create namespaces, secrets, and run Helm in this cluster."
+
+	case strings.Contains(msg, "timeout") || strings.Contains(msg, "timed out") ||
+		strings.Contains(msg, "deadline"):
+		return "The operation timed out. The cluster may be under load or still initialising.\n" +
+			"    Wait a minute, then retry — bolt will skip already-completed steps."
+
+	case strings.Contains(msg, "create secret") || strings.Contains(msg, "tfe-secrets") ||
+		strings.Contains(msg, "tfe-storage"):
+		return "Kubernetes secret creation failed. Check that the namespace exists and your\n" +
+			"    credentials have 'kubectl create secret' permission:\n" +
+			"    kubectl auth can-i create secrets -n tfe"
+
+	default:
+		return "Review the error and kubectl output above, fix the underlying issue in your\n" +
+			"    terminal or cloud console, then hit Retry — bolt will resume from where it stopped."
+	}
+}
+
+// infraHint returns a human-readable suggestion based on why infra provisioning failed.
+func infraHint(err error) string {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "Docker is not running") || strings.Contains(msg, "docker daemon") ||
+		strings.Contains(msg, "Cannot connect to the Docker daemon"):
+		return "Start Docker Desktop, wait for it to finish starting, then retry."
+
+	case strings.Contains(msg, "kind: command not found") || strings.Contains(msg, "kind not found") ||
+		strings.Contains(msg, "kind version"):
+		return "Install kind first: brew install kind  (Mac) or https://kind.sigs.k8s.io/docs/user/quick-start/#installation"
+
+	case strings.Contains(msg, "ssh:") || strings.Contains(msg, "SSH") ||
+		strings.Contains(msg, "dial tcp") || strings.Contains(msg, "connection refused"):
+		return "SSH connection failed. Check the host is reachable, the SSH key is correct,\n" +
+			"    and that your user has sudo access on the target machine."
+
+	case strings.Contains(msg, "kubeadm") || strings.Contains(msg, "kubeadm: command not found"):
+		return "kubeadm is not installed on the target machine.\n" +
+			"    Install it: https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/install-kubeadm/"
+
+	case strings.Contains(msg, "Unauthorized") || strings.Contains(msg, "ExpiredToken") ||
+		strings.Contains(msg, "credential"):
+		return "Cloud credentials have expired. Refresh them and retry:\n" +
+			"    AWS — re-authenticate via Doormat or export fresh AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY\n" +
+			"    Azure — run: az login\n" +
+			"    GCP   — run: gcloud auth application-default login"
+
+	case strings.Contains(msg, "quota") || strings.Contains(msg, "limit exceeded") ||
+		strings.Contains(msg, "LimitExceeded"):
+		return "Cloud resource quota exceeded. Request a quota increase in your cloud console, or\n" +
+			"    destroy existing unused resources to free capacity, then retry."
+
+	case strings.Contains(msg, "VPC") || strings.Contains(msg, "subnet"):
+		return "VPC or subnet provisioning failed. Check that the region has available CIDR space\n" +
+			"    and that your account can create VPCs."
+
+	default:
+		return "Review the error above, fix the underlying issue, then retry — bolt will skip\n" +
+			"    already-completed provisioning steps."
+	}
+}
+
+func normalizeHostname(h string) string {
+	h = strings.TrimSpace(h)
+	h = strings.TrimPrefix(h, "https://")
+	h = strings.TrimPrefix(h, "http://")
+	return strings.TrimRight(h, "/")
 }
 
 // buildInfraConfig converts an InfraWizardResult into the InfraConfig the
@@ -460,6 +692,9 @@ func buildInfraConfig(r *InfraWizardResult, deploymentName string) *infra.InfraC
 			Zone:            r.GCPCreds.Zone,
 			ServiceAcctJSON: r.GCPCreds.ServiceAcctJSON,
 		}
+	}
+	if r.LocalCreds != nil {
+		cfg.Local = r.LocalCreds
 	}
 	return cfg
 }
