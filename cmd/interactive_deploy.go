@@ -112,6 +112,7 @@ func interactiveDeployK8s() error {
 		gkeProject       string
 		kubeconfig       string
 
+		imageTag           = "latest"
 		license            = os.Getenv("TFE_LICENSE")
 		encryptionPassword = os.Getenv("TFE_ENCRYPTION_PASSWORD")
 		tlsCertPath        string
@@ -146,7 +147,46 @@ func interactiveDeployK8s() error {
 		mode = "external"
 	}
 
+	// Fetch available TFE release tags from the container registry.
+	// Uses TFE_LICENSE from env if set; falls back to a text input on failure.
+	registryUser := os.Getenv("TFE_REGISTRY_USERNAME")
+	if registryUser == "" {
+		registryUser = "terraform"
+	}
+	fmt.Print(hintStyle.Render("  Fetching available TFE releases…  "))
+	releaseTags, releaseFetchErr := fetchTFEReleaseTags(registryUser, os.Getenv("TFE_LICENSE"))
+	if releaseFetchErr != nil {
+		fmt.Println(lipgloss.NewStyle().Foreground(amberColor).Render("✗  (will use text input)"))
+	} else {
+		fmt.Println(lipgloss.NewStyle().Foreground(greenColor).Render("✓"))
+	}
+
+	var versionGroup *huh.Group
+	if releaseFetchErr == nil && len(releaseTags) > 0 {
+		opts := make([]huh.Option[string], 0, len(releaseTags)+1)
+		opts = append(opts, huh.NewOption("latest  (always the most recent release)", "latest"))
+		for _, t := range releaseTags {
+			opts = append(opts, huh.NewOption(t, t))
+		}
+		versionGroup = huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("TFE release to deploy").
+				Description("Select the version — latest always tracks the newest release").
+				Options(opts...).
+				Value(&imageTag),
+		)
+	} else {
+		versionGroup = huh.NewGroup(
+			huh.NewInput().
+				Title("TFE release to deploy").
+				Description("Enter an image tag (e.g. v202507-1) or leave blank for latest").
+				Placeholder("latest").
+				Value(&imageTag),
+		)
+	}
+
 	groups := []*huh.Group{
+		versionGroup,
 		// ── Basic cluster settings ─────────────────────────────────────────────
 		huh.NewGroup(
 			huh.NewSelect[string]().
@@ -331,7 +371,7 @@ func interactiveDeployK8s() error {
 		ClusterType:      state.ClusterType(clusterType),
 		Namespace:        namespace,
 		Hostname:         hostname,
-		ImageTag:         "latest",
+		ImageTag:         imageTag,
 		Kubeconfig:       resolvedKubeconfig,
 		TLSCertPath:      tlsCertPath,
 		TLSKeyPath:       tlsKeyPath,

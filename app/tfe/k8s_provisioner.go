@@ -109,11 +109,21 @@ func (p *K8sProvisioner) Deploy(creds *credentials.TFECredentials) error {
 	go func() {
 		ticker := time.NewTicker(20 * time.Second)
 		defer ticker.Stop()
+		imagePullNoteShown := false
 		for {
 			select {
 			case <-ticker.C:
-				fmt.Printf("\n  ── pod status at %s ──\n", time.Now().Format("15:04:05"))
-				_ = kubectl.GetPods(d)
+				if kubectl.AnyPodsPending(d) {
+					if !imagePullNoteShown {
+						fmt.Println("\n  ℹ  TFE image is ~2 GB — pull time varies by node bandwidth, typically 3–8 min on first deploy")
+						imagePullNoteShown = true
+					}
+					fmt.Printf("\n  ── pod events at %s ──\n", time.Now().Format("15:04:05"))
+					_ = kubectl.PrintPodEvents(d)
+				} else {
+					fmt.Printf("\n  ── pod status at %s ──\n", time.Now().Format("15:04:05"))
+					_ = kubectl.GetPods(d)
+				}
 				fmt.Println()
 			case <-stopPoll:
 				return

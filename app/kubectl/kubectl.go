@@ -146,3 +146,37 @@ func GetPods(d *state.TFEDeployment) error {
 	a := args(d, "get", "pods", "--namespace", d.Namespace)
 	return runner.Run("kubectl", a, runner.RunOptions{Env: env(d)})
 }
+
+// AnyPodsPending returns true when at least one pod in the namespace is not
+// yet Running — i.e. still pulling the image or initialising containers.
+func AnyPodsPending(d *state.TFEDeployment) bool {
+	out, err := runner.Output("kubectl", args(d,
+		"get", "pods",
+		"--namespace", d.Namespace,
+		"--no-headers",
+	), runner.RunOptions{Env: env(d)})
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.Contains(line, "Pending") ||
+			strings.Contains(line, "ContainerCreating") ||
+			strings.Contains(line, "Init:") ||
+			strings.Contains(line, "PodInitializing") {
+			return true
+		}
+	}
+	return false
+}
+
+// PrintPodEvents prints recent Kubernetes events for the namespace, sorted by
+// timestamp.  Used while pods are pending so the user can see image-pull
+// progress and other lifecycle events instead of a static "Pending" status.
+func PrintPodEvents(d *state.TFEDeployment) error {
+	a := args(d,
+		"get", "events",
+		"--namespace", d.Namespace,
+		"--sort-by=.lastTimestamp",
+	)
+	return runner.Run("kubectl", a, runner.RunOptions{Env: env(d)})
+}
