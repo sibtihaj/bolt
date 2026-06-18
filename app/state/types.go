@@ -24,6 +24,7 @@ const (
 	ClusterAKS     ClusterType = "aks"
 	ClusterGKE     ClusterType = "gke"
 	ClusterKubeadm ClusterType = "kubeadm"
+	ClusterKind    ClusterType = "kind"
 )
 
 type DeploymentStatus string
@@ -65,6 +66,9 @@ type TFEDeployment struct {
 	// InfraState tracks cloud resources bolt provisioned for this deployment.
 	InfraState *InfraState      `json:"infra_state,omitempty"`
 	Status     DeploymentStatus `json:"status"`
+	// ExtraEnv holds runtime-only environment variables (e.g. AWS credentials for
+	// EKS token generation).  Never persisted — json:"-" keeps it out of state files.
+	ExtraEnv []string `json:"-"`
 	CreatedAt  time.Time        `json:"created_at"`
 	UpdatedAt  time.Time        `json:"updated_at"`
 }
@@ -118,4 +122,7 @@ type InfraState struct {
 	GCSBucketCreated      string `json:"gcs_bucket_created,omitempty"`
 	CloudSQLInstanceID    string `json:"cloudsql_instance_id,omitempty"`
 	GKEClusterCreated     string `json:"gke_cluster_created,omitempty"`
+
+	// Local-provisioned resources
+	KindClusterName string `json:"kind_cluster_name,omitempty"`
 }

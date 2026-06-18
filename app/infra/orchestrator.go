@@ -14,6 +14,7 @@ import (
 	"github.com/sibtihaj/bolt/app/infra/errs"
 	gcpinfra "github.com/sibtihaj/bolt/app/infra/gcp"
 	k8sinfra "github.com/sibtihaj/bolt/app/infra/k8s"
+	localinfra "github.com/sibtihaj/bolt/app/infra/local"
 	"github.com/sibtihaj/bolt/app/preflight"
 	"github.com/sibtihaj/bolt/app/state"
 )
@@ -49,6 +50,8 @@ func Provision(ctx context.Context, cfg *InfraConfig, infraState *state.InfraSta
 		return provisionAzure(ctx, cfg, infraState, outputs)
 	case CloudGCP:
 		return provisionGCP(ctx, cfg, infraState, outputs)
+	case CloudLocal:
+		return provisionLocal(ctx, cfg, infraState, outputs)
 	}
 	return nil, fmt.Errorf("unsupported cloud provider: %q", cfg.Cloud)
 }
@@ -403,6 +406,66 @@ func provisionGCP(ctx context.Context, cfg *InfraConfig, infraState *state.Infra
 		})
 		if err != nil {
 			return nil, fmt.Errorf("in-cluster PostgreSQL: %w", err)
+		}
+		out.DatabaseURL = dbURL
+		done("In-cluster PostgreSQL ready")
+	}
+
+	return out, nil
+}
+
+// ── Local (kind / kubeadm) ────────────────────────────────────────────────────
+
+func provisionLocal(ctx context.Context, cfg *InfraConfig, infraState *state.InfraState, out *InfraOutputs) (*InfraOutputs, error) {
+	defer globalSpinner.stop()
+
+	if cfg.Local == nil {
+		return nil, fmt.Errorf("local provisioner requires LocalCreds in InfraConfig")
+	}
+
+	var kubeconfigPath string
+	var err error
+
+	switch cfg.Local.SubType {
+	case LocalKind:
+		globalSpinner.stop()
+		fmt.Printf("  ⋯  Provisioning kind cluster (bolt-%s)…\n", cfg.NamePrefix)
+		kubeconfigPath, err = localinfra.EnsureKindCluster(cfg.NamePrefix, true)
+		if err != nil {
+			return nil, fmt.Errorf("kind cluster: %w", err)
+		}
+		infraState.KindClusterName = "bolt-" + cfg.NamePrefix
+		done("kind cluster ready: bolt-" + cfg.NamePrefix)
+
+	case LocalKubeadm:
+		step("Provisioning kubeadm cluster via SSH…")
+		kubeconfigPath, err = localinfra.EnsureKubeadmCluster(cfg.NamePrefix, localinfra.SSHConfig{
+			Host:    cfg.Local.SSHHost,
+			User:    cfg.Local.SSHUser,
+			KeyPath: cfg.Local.SSHKeyPath,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("kubeadm cluster: %w", err)
+		}
+		done("kubeadm cluster ready: " + cfg.Local.SSHHost)
+
+	default:
+		return nil, fmt.Errorf("unknown local sub-type: %q", cfg.Local.SubType)
+	}
+
+	out.KubeconfigPath = kubeconfigPath
+
+	if cfg.Database == DBInCluster {
+		dbPass := generatePassword(24)
+		step("Deploying in-cluster PostgreSQL StatefulSet…")
+		dbURL, dbErr := k8sinfra.EnsureInClusterPostgres(&k8sinfra.InClusterPostgresConfig{
+			Namespace:  "tfe",
+			Password:   dbPass,
+			StorageGB:  20,
+			Kubeconfig: kubeconfigPath,
+		})
+		if dbErr != nil {
+			return nil, fmt.Errorf("in-cluster PostgreSQL: %w", dbErr)
 		}
 		out.DatabaseURL = dbURL
 		done("In-cluster PostgreSQL ready")

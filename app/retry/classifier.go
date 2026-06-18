@@ -48,6 +48,9 @@ var fatalPatterns = []string{
 	"already exists",
 	"chart not found",
 	"does not exist",
+	"Required value",
+	"is invalid:",
+	"cannot patch",
 }
 
 // retryablePatterns — transient errors worth retrying.

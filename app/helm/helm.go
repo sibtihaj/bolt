@@ -22,10 +22,12 @@ func kubeconfigArgs(d *state.TFEDeployment) []string {
 }
 
 func kubeconfigEnv(d *state.TFEDeployment) []string {
+	var e []string
 	if d.Kubeconfig != "" {
-		return []string{"KUBECONFIG=" + d.Kubeconfig}
+		e = append(e, "KUBECONFIG="+d.Kubeconfig)
 	}
-	return nil
+	e = append(e, d.ExtraEnv...)
+	return e
 }
 
 // RepoAdd adds the HashiCorp Helm repo (idempotent — ignores "already exists").

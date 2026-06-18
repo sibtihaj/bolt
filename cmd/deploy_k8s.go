@@ -9,8 +9,10 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/sibtihaj/bolt/app/credentials"
 	"github.com/sibtihaj/bolt/app/helm"
+	localinfra "github.com/sibtihaj/bolt/app/infra/local"
 	"github.com/sibtihaj/bolt/app/state"
 	"github.com/sibtihaj/bolt/app/tfe"
+	apptls "github.com/sibtihaj/bolt/app/tls"
 )
 
 var k8sOpts struct {
@@ -29,6 +31,8 @@ var k8sOpts struct {
 	License             string
 	LicensePath         string
 	EncryptionPassword  string
+	RegistryUsername    string
+	RegistryPassword    string
 	TLSCertPath         string
 	TLSKeyPath          string
 	DatabaseURL         string
@@ -61,9 +65,9 @@ var deployK8sCmd = &cobra.Command{
 		if !validModes[k8sOpts.Mode] {
 			return fmt.Errorf("--mode must be disk, external, or active-active (got %q)", k8sOpts.Mode)
 		}
-		validTypes := map[string]bool{"eks": true, "aks": true, "gke": true, "kubeadm": true}
+		validTypes := map[string]bool{"eks": true, "aks": true, "gke": true, "kubeadm": true, "kind": true}
 		if !validTypes[k8sOpts.ClusterType] {
-			return fmt.Errorf("--cluster-type must be eks, aks, gke, or kubeadm (got %q)", k8sOpts.ClusterType)
+			return fmt.Errorf("--cluster-type must be eks, aks, gke, kubeadm, or kind (got %q)", k8sOpts.ClusterType)
 		}
 		if k8sOpts.Mode != "disk" && k8sOpts.DatabaseURL == "" && os.Getenv("TFE_DATABASE_URL") == "" {
 			return fmt.Errorf("--db-url (or TFE_DATABASE_URL) is required for mode %q", k8sOpts.Mode)
@@ -77,6 +81,7 @@ var deployK8sCmd = &cobra.Command{
 		creds, err := credentials.Resolve(credentials.Flags{
 			License: k8sOpts.License, LicensePath: k8sOpts.LicensePath,
 			EncryptionPassword: k8sOpts.EncryptionPassword,
+			RegistryUsername: k8sOpts.RegistryUsername, RegistryPassword: k8sOpts.RegistryPassword,
 			TLSCertPath: k8sOpts.TLSCertPath, TLSKeyPath: k8sOpts.TLSKeyPath,
 			DatabaseURL: k8sOpts.DatabaseURL, S3Bucket: k8sOpts.S3Bucket,
 			S3Region: k8sOpts.S3Region, S3AccessKeyID: k8sOpts.S3AccessKeyID,
@@ -95,6 +100,15 @@ var deployK8sCmd = &cobra.Command{
 		}
 		if globalConfig.DefaultImageTag != "" && imageTag == "latest" {
 			imageTag = globalConfig.DefaultImageTag
+		}
+
+		// For kind: provision the cluster if it doesn't exist yet, and use its kubeconfig.
+		if k8sOpts.ClusterType == "kind" && k8sOpts.Kubeconfig == "" {
+			kubeconfigPath, err := localinfra.EnsureKindCluster(k8sOpts.Name, false)
+			if err != nil {
+				return fmt.Errorf("kind cluster: %w", err)
+			}
+			k8sOpts.Kubeconfig = kubeconfigPath
 		}
 
 		kubeconfig := k8sOpts.Kubeconfig
@@ -152,8 +166,9 @@ var deployK8sCmd = &cobra.Command{
 			tlsDir := filepath.Join(home, ".bolt", "tls", d.Name)
 			certPath := filepath.Join(tlsDir, "tfe.crt")
 			keyPath := filepath.Join(tlsDir, "tfe.key")
-			if err := os.MkdirAll(tlsDir, 0700); err != nil {
-				return err
+			fmt.Printf("→ Generating self-signed TLS certificate for %s…\n", d.Hostname)
+			if err := apptls.GenerateSelfSignedCert(d.Hostname, certPath, keyPath); err != nil {
+				return fmt.Errorf("generate TLS: %w", err)
 			}
 			d.TLSCertPath = certPath
 			d.TLSKeyPath = keyPath
@@ -188,6 +203,8 @@ func init() {
 	f.StringVar(&k8sOpts.License, "license", "", "TFE license string (or use TFE_LICENSE env)")
 	f.StringVar(&k8sOpts.LicensePath, "license-path", "", "path to TFE license file (or use TFE_LICENSE_PATH env)")
 	f.StringVar(&k8sOpts.EncryptionPassword, "encryption-password", "", "TFE encryption password")
+	f.StringVar(&k8sOpts.RegistryUsername, "registry-username", "", "container registry username (default: terraform; or TFE_REGISTRY_USERNAME)")
+	f.StringVar(&k8sOpts.RegistryPassword, "registry-password", "", "container registry password (default: license; or TFE_REGISTRY_PASSWORD)")
 	f.StringVar(&k8sOpts.TLSCertPath, "tls-cert", "", "path to TLS certificate PEM file")
 	f.StringVar(&k8sOpts.TLSKeyPath, "tls-key", "", "path to TLS private key PEM file")
 	f.StringVar(&k8sOpts.DatabaseURL, "db-url", "", "PostgreSQL connection URL (external/active-active)")

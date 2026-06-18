@@ -20,6 +20,9 @@ type Flags struct {
 	S3AccessKeyID       string
 	S3SecretAccessKey   string
 	RedisURL            string
+	// Container registry (images.releases.hashicorp.com)
+	RegistryUsername    string
+	RegistryPassword    string
 	// Cloud provider
 	AWSProfile          string
 	GCPSAKeyPath        string
@@ -42,6 +45,10 @@ type TFECredentials struct {
 	S3AccessKeyID      string
 	S3SecretAccessKey  string
 	RedisURL           string
+	// Container registry credentials for images.releases.hashicorp.com.
+	// Username defaults to "terraform"; password defaults to the license.
+	RegistryUsername string
+	RegistryPassword string
 	// Cloud provider (used to configure kubeconfig)
 	AWSProfile          string
 	GCPSAKeyPath        string
@@ -89,6 +96,10 @@ func Resolve(f Flags, cfg *config.TFEConfig) (*TFECredentials, error) {
 	c.S3AccessKeyID = first(f.S3AccessKeyID, os.Getenv("TFE_S3_ACCESS_KEY_ID"))
 	c.S3SecretAccessKey = first(f.S3SecretAccessKey, os.Getenv("TFE_S3_SECRET_ACCESS_KEY"))
 	c.RedisURL = first(f.RedisURL, os.Getenv("TFE_REDIS_URL"))
+
+	// Container registry — default username "terraform", default password = license
+	c.RegistryUsername = first(f.RegistryUsername, os.Getenv("TFE_REGISTRY_USERNAME"), "terraform")
+	c.RegistryPassword = first(f.RegistryPassword, os.Getenv("TFE_REGISTRY_PASSWORD"), c.License)
 
 	// Cloud provider
 	c.AWSProfile = first(f.AWSProfile, os.Getenv("AWS_PROFILE"))

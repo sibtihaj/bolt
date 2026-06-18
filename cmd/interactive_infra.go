@@ -20,6 +20,7 @@ type InfraWizardResult struct {
 	AWSCreds     *preflight.AWSConfig
 	AzureCreds   *preflight.AzureConfig
 	GCPCreds     *preflight.GCPConfig
+	LocalCreds   *infra.LocalCreds
 	// Set after validation
 	AWSIdentity  *preflight.AWSIdentity
 }
@@ -126,6 +127,7 @@ func interactiveInfraSource(backend string) (infra.ProvisionMode, infra.CloudPro
 					huh.NewOption("  ☁  Amazon Web Services  (EKS / RDS / S3)", "aws"),
 					huh.NewOption("  ☁  Microsoft Azure  (AKS / Azure DB / Blob)", "azure"),
 					huh.NewOption("  ☁  Google Cloud  (GKE / Cloud SQL / GCS)", "gcp"),
+					huh.NewOption("  ⬡  Local  (kind / kubeadm — no cloud credentials)", "local"),
 				).
 				Value(&cloudStr),
 		).WithHideFunc(func() bool { return modeStr == "byo" }),
@@ -171,6 +173,11 @@ func interactiveAWSCredentials() (*preflight.AWSConfig, *preflight.AWSIdentity, 
 		if source == "doormat" {
 			return interactiveAWSViaDoormat()
 		}
+	}
+
+	// Manual credential path — show permissions disclaimer before key entry.
+	if err := interactiveInfraWarning("aws"); err != nil {
+		return nil, nil, err
 	}
 
 	var authMode string
@@ -450,6 +457,62 @@ func interactiveGCPCredentials() (*preflight.GCPConfig, error) {
 	return cfg, nil
 }
 
+// interactiveLocalConfig collects kind/kubeadm sub-type and (for kubeadm) SSH details.
+func interactiveLocalConfig() (*infra.LocalCreds, error) {
+	var subType string
+	err := huh.NewForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Local cluster backend").
+				Options(
+					huh.NewOption("  ⬡  kind  — Mac/Linux via Docker Desktop  (recommended)", "kind"),
+					huh.NewOption("  ⚙  kubeadm  — Linux server via SSH", "kubeadm"),
+				).
+				Value(&subType),
+		),
+	).WithTheme(boltTheme()).Run()
+	if errors.Is(err, huh.ErrUserAborted) {
+		return nil, fmt.Errorf("cancelled")
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	creds := &infra.LocalCreds{SubType: infra.LocalSubType(subType)}
+
+	if subType == "kubeadm" {
+		creds.SSHUser = "root"
+		err = huh.NewForm(
+			huh.NewGroup(
+				huh.NewInput().
+					Title("SSH host  (IP or hostname of the Linux server)").
+					Placeholder("192.168.1.100").
+					Value(&creds.SSHHost).
+					Validate(notEmpty("SSH host")),
+				huh.NewInput().
+					Title("SSH user").
+					Placeholder("root").
+					Value(&creds.SSHUser),
+				huh.NewInput().
+					Title("SSH key path  (leave blank for default ~/.ssh/id_rsa)").
+					Placeholder("~/.ssh/id_rsa").
+					Value(&creds.SSHKeyPath),
+			),
+		).WithTheme(boltTheme()).Run()
+		if errors.Is(err, huh.ErrUserAborted) {
+			return nil, fmt.Errorf("cancelled")
+		}
+		if err != nil {
+			return nil, err
+		}
+		if creds.SSHUser == "" {
+			creds.SSHUser = "root"
+		}
+	}
+
+	return creds, nil
+}
+
 // interactiveSizing asks the user to choose a resource sizing tier.
 func interactiveSizing(cloud infra.CloudProvider) (infra.ResourceSizing, error) {
 	min := infra.DefaultSizing(infra.TierMinimum, cloud)
@@ -536,6 +599,30 @@ func interactiveSizing(cloud infra.CloudProvider) (infra.ResourceSizing, error) 
 		DBClass:   dbClass,
 		DBStorage: storage,
 	}, nil
+}
+
+// interactiveDatabaseChoiceLocal offers only in-cluster and BYO options —
+// managed cloud databases are not available for local provisioning.
+func interactiveDatabaseChoiceLocal() (infra.DatabaseChoice, error) {
+	var dbChoice string
+	err := huh.NewForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Database for external / active-active mode").
+				Options(
+					huh.NewOption("  ◎  None  — disk mode  (TFE stores data locally)", "byo"),
+					huh.NewOption("  ◎  In-cluster PostgreSQL  — for external / active-active mode", "in-cluster"),
+				).
+				Value(&dbChoice),
+		),
+	).WithTheme(boltTheme()).Run()
+	if errors.Is(err, huh.ErrUserAborted) {
+		return "", fmt.Errorf("cancelled")
+	}
+	if err != nil {
+		return "", err
+	}
+	return infra.DatabaseChoice(dbChoice), nil
 }
 
 // interactiveDatabaseChoice asks where PostgreSQL should run.
@@ -665,6 +752,18 @@ func buildProvisionPlanItems(result *InfraWizardResult, prefix string) []string 
 		} else if result.Database == infra.DBInCluster {
 			items = append(items, "PostgreSQL StatefulSet in namespace tfe")
 		}
+	case infra.CloudLocal:
+		if result.LocalCreds != nil {
+			switch result.LocalCreds.SubType {
+			case infra.LocalKind:
+				items = append(items, "kind cluster: bolt-"+prefix+"  (via Docker Desktop)")
+			case infra.LocalKubeadm:
+				items = append(items, "kubeadm cluster on "+result.LocalCreds.SSHHost+"  (via SSH)")
+			}
+		}
+		if result.Database == infra.DBInCluster {
+			items = append(items, "PostgreSQL StatefulSet in namespace tfe")
+		}
 	}
 	return items
 }
@@ -743,9 +842,33 @@ func RunInfraWizard(deploymentName string) (*InfraWizardResult, error) {
 		return result, nil
 	}
 
+	// Local path: collect sub-type + SSH config, skip credentials and sizing.
+	if cloud == infra.CloudLocal {
+		localCreds, err := interactiveLocalConfig()
+		if err != nil {
+			return nil, err
+		}
+		result.LocalCreds = localCreds
+
+		dbChoice, err := interactiveDatabaseChoiceLocal()
+		if err != nil {
+			return nil, err
+		}
+		result.Database = dbChoice
+
+		if err := interactiveInfraPlan(result, deploymentName); err != nil {
+			return nil, err
+		}
+		return result, nil
+	}
+
 	// Show permission requirements before asking for credentials.
-	if err := interactiveInfraWarning(string(cloud)); err != nil {
-		return nil, err
+	// AWS handles this inside interactiveAWSCredentials — the disclaimer is only
+	// shown when the user picks manual credential entry; Doormat users skip it.
+	if cloud != infra.CloudAWS {
+		if err := interactiveInfraWarning(string(cloud)); err != nil {
+			return nil, err
+		}
 	}
 
 	// Collect cloud-specific credentials.

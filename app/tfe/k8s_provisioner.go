@@ -59,13 +59,21 @@ func (p *K8sProvisioner) Deploy(creds *credentials.TFECredentials) error {
 		return fmt.Errorf("create TLS secret: %w", err)
 	}
 
+	fmt.Println("→ Verifying container registry credentials…")
+	if err := kubectl.ValidateRegistryCredentials(creds.RegistryUsername, creds.RegistryPassword); err != nil {
+		return err
+	}
+	if err := kubectl.UpsertImagePullSecret(d, "tfe-image-pull", creds.RegistryUsername, creds.RegistryPassword); err != nil {
+		return fmt.Errorf("create image pull secret: %w", err)
+	}
+
 	if d.Mode == state.ModeExternal || d.Mode == state.ModeActiveActive {
 		storageData := map[string]string{
-			"TFE_DATABASE_URL":         creds.DatabaseURL,
-			"TFE_S3_BUCKET":            creds.S3Bucket,
-			"TFE_S3_REGION":            creds.S3Region,
-			"TFE_S3_ACCESS_KEY_ID":     creds.S3AccessKeyID,
-			"TFE_S3_SECRET_ACCESS_KEY": creds.S3SecretAccessKey,
+			"TFE_DATABASE_URL":                        creds.DatabaseURL,
+			"TFE_OBJECT_STORAGE_S3_BUCKET":            creds.S3Bucket,
+			"TFE_OBJECT_STORAGE_S3_REGION":            creds.S3Region,
+			"TFE_OBJECT_STORAGE_S3_ACCESS_KEY_ID":     creds.S3AccessKeyID,
+			"TFE_OBJECT_STORAGE_S3_SECRET_ACCESS_KEY": creds.S3SecretAccessKey,
 		}
 		if d.Mode == state.ModeActiveActive {
 			storageData["TFE_REDIS_URL"] = creds.RedisURL
@@ -95,15 +103,42 @@ func (p *K8sProvisioner) Deploy(creds *credentials.TFECredentials) error {
 		return err
 	}
 
-	// 7. Helm install (streams live output; retried on transient failures)
+	// 7. Helm install — poll pod status every 20s so the user can see what's happening
 	fmt.Println("→ Installing Terraform Enterprise via Helm (this may take several minutes)...")
+	stopPoll := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(20 * time.Second)
+		defer ticker.Stop()
+		imagePullNoteShown := false
+		for {
+			select {
+			case <-ticker.C:
+				if kubectl.AnyPodsPending(d) {
+					if !imagePullNoteShown {
+						fmt.Println("\n  ℹ  TFE image is ~2 GB — pull time varies by node bandwidth, typically 3–8 min on first deploy")
+						imagePullNoteShown = true
+					}
+					fmt.Printf("\n  ── pod events at %s ──\n", time.Now().Format("15:04:05"))
+					_ = kubectl.PrintPodEvents(d)
+				} else {
+					fmt.Printf("\n  ── pod status at %s ──\n", time.Now().Format("15:04:05"))
+					_ = kubectl.GetPods(d)
+				}
+				fmt.Println()
+			case <-stopPoll:
+				return
+			}
+		}
+	}()
 	timeout := "10m"
-	if err := retry.Do("helm install", retry.DefaultK8s, func(buf *bytes.Buffer) error {
+	helmErr := retry.Do("helm install", retry.DefaultK8s, func(buf *bytes.Buffer) error {
 		return helm.Install(d, valuesPath, timeout, buf)
-	}); err != nil {
+	})
+	close(stopPoll)
+	if helmErr != nil {
 		diagnostics.DiagnoseK8s(d.Namespace, "tfe")
 		p.diagnoseCloud()
-		return fmt.Errorf("helm install: %w", err)
+		return fmt.Errorf("helm install: %w", helmErr)
 	}
 
 	// 8. Save state
@@ -163,6 +198,8 @@ func (p *K8sProvisioner) configureKubeconfig(creds *credentials.TFECredentials) 
 		return cloud.ConfigureGKEKubeconfig(d, creds)
 	case state.ClusterKubeadm:
 		return nil
+	case state.ClusterKind:
+		return nil // kubeconfig written during provisioning
 	default:
 		return fmt.Errorf("unknown cluster type: %s", d.ClusterType)
 	}
