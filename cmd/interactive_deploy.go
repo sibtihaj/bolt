@@ -147,8 +147,9 @@ func interactiveDeployK8s() error {
 		mode = "external"
 	}
 
-	// Fetch available TFE release tags from the container registry.
-	// Uses TFE_LICENSE from env if set; falls back to a text input on failure.
+	// ── TFE version selection — two-step scrollable picker ───────────────────
+	// Step 1: year / group. Step 2: exact release within that year.
+	// Falls back to a text input if registry credentials are not yet available.
 	registryUser := os.Getenv("TFE_REGISTRY_USERNAME")
 	if registryUser == "" {
 		registryUser = "terraform"
@@ -161,32 +162,83 @@ func interactiveDeployK8s() error {
 		fmt.Println(lipgloss.NewStyle().Foreground(greenColor).Render("✓"))
 	}
 
-	var versionGroup *huh.Group
 	if releaseFetchErr == nil && len(releaseTags) > 0 {
-		opts := make([]huh.Option[string], 0, len(releaseTags)+1)
-		opts = append(opts, huh.NewOption("latest  (always the most recent release)", "latest"))
-		for _, t := range releaseTags {
-			opts = append(opts, huh.NewOption(t, t))
+		rgroups := groupReleases(releaseTags)
+
+		// Step 1 — pick year / group (or "latest")
+		yearOpts := []huh.Option[string]{
+			huh.NewOption("latest  —  always the most recent release", "latest"),
 		}
-		versionGroup = huh.NewGroup(
-			huh.NewSelect[string]().
-				Title("TFE release to deploy").
-				Description("Select the version — latest always tracks the newest release").
-				Options(opts...).
-				Value(&imageTag),
-		)
+		for _, g := range rgroups {
+			yearOpts = append(yearOpts, huh.NewOption(g.label, g.key))
+		}
+		var selectedKey string
+		if err := huh.NewForm(
+			huh.NewGroup(
+				huh.NewSelect[string]().
+					Title("TFE release year").
+					Description("↑ ↓ to scroll  •  enter to confirm").
+					Options(yearOpts...).
+					Value(&selectedKey),
+			),
+		).WithTheme(boltTheme()).Run(); err != nil {
+			if errors.Is(err, huh.ErrUserAborted) {
+				return nil
+			}
+			return err
+		}
+
+		// Step 2 — pick exact release (skipped when "latest" chosen)
+		if selectedKey != "latest" {
+			var chosen releaseGroup
+			for _, g := range rgroups {
+				if g.key == selectedKey {
+					chosen = g
+					break
+				}
+			}
+			releaseOpts := make([]huh.Option[string], len(chosen.releases))
+			for i, r := range chosen.releases {
+				releaseOpts[i] = huh.NewOption(releaseLabel(r), r)
+			}
+			if err := huh.NewForm(
+				huh.NewGroup(
+					huh.NewSelect[string]().
+						Title(fmt.Sprintf("TFE %s release", selectedKey)).
+						Description("↑ ↓ to scroll  •  enter to confirm").
+						Options(releaseOpts...).
+						Value(&imageTag),
+				),
+			).WithTheme(boltTheme()).Run(); err != nil {
+				if errors.Is(err, huh.ErrUserAborted) {
+					return nil
+				}
+				return err
+			}
+		}
+		// imageTag stays "latest" when selectedKey == "latest"
 	} else {
-		versionGroup = huh.NewGroup(
-			huh.NewInput().
-				Title("TFE release to deploy").
-				Description("Enter an image tag (e.g. v202507-1) or leave blank for latest").
-				Placeholder("latest").
-				Value(&imageTag),
-		)
+		// No registry access yet — free-text fallback
+		if err := huh.NewForm(
+			huh.NewGroup(
+				huh.NewInput().
+					Title("TFE release to deploy").
+					Description("Enter an image tag (e.g. v202507-1) or leave blank for latest").
+					Placeholder("latest").
+					Value(&imageTag),
+			),
+		).WithTheme(boltTheme()).Run(); err != nil {
+			if errors.Is(err, huh.ErrUserAborted) {
+				return nil
+			}
+			return err
+		}
+		if imageTag == "" {
+			imageTag = "latest"
+		}
 	}
 
 	groups := []*huh.Group{
-		versionGroup,
 		// ── Basic cluster settings ─────────────────────────────────────────────
 		huh.NewGroup(
 			huh.NewSelect[string]().
