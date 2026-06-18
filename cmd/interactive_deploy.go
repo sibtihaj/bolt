@@ -584,11 +584,14 @@ func deployHint(err error) string {
 			"    kubectl describe pod -n tfe <pod-name>\n" +
 			"    kubectl logs -n tfe -l app.kubernetes.io/name=terraform-enterprise"
 
-	case strings.Contains(msg, "image pull secret") || strings.Contains(msg, "tfe-image-pull"):
-		return "Registry credential error. Set your container registry credentials and retry:\n" +
+	case strings.Contains(msg, "image pull secret") || strings.Contains(msg, "tfe-image-pull") ||
+		strings.Contains(msg, "registry authentication failed"):
+		return "Registry authentication failed. In a new terminal tab, run:\n" +
 			"    export TFE_REGISTRY_USERNAME=terraform\n" +
 			"    export TFE_REGISTRY_PASSWORD=<your-TFE-license-key>\n" +
-			"    Then verify with: docker login images.releases.hashicorp.com"
+			"    docker login images.releases.hashicorp.com\n" +
+			"  If docker login succeeds, hit Retry. If it returns 401, your license\n" +
+			"  key may not have registry access — contact HashiCorp support."
 
 	case strings.Contains(msg, "ImagePull") || strings.Contains(msg, "ErrImagePull") ||
 		strings.Contains(msg, "unauthorized") && strings.Contains(msg, "image"):
