@@ -2,7 +2,10 @@ package kubectl
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 
 	runner "github.com/sibtihaj/bolt/internal/exec"
@@ -89,6 +92,32 @@ func UpsertTLSSecret(d *state.TFEDeployment, secretName, certPath, keyPath strin
 		"--key", keyPath,
 	)
 	return runner.Run("kubectl", createArgs, runner.RunOptions{Env: env(d)})
+}
+
+// ValidateRegistryCredentials does a lightweight HTTP probe to verify that
+// username/password are accepted by images.releases.hashicorp.com before
+// creating the Kubernetes secret — failing fast is friendlier than waiting for
+// pods to enter ImagePullBackOff.
+func ValidateRegistryCredentials(username, password string) error {
+	req, err := http.NewRequest(http.MethodGet, "https://images.releases.hashicorp.com/v2/", nil)
+	if err != nil {
+		return fmt.Errorf("build registry probe request: %w", err)
+	}
+	token := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
+	req.Header.Set("Authorization", "Basic "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("reach images.releases.hashicorp.com: %w", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return fmt.Errorf(
+			"registry authentication failed (HTTP %d) — set TFE_REGISTRY_USERNAME and TFE_REGISTRY_PASSWORD to your images.releases.hashicorp.com credentials",
+			resp.StatusCode,
+		)
+	}
+	return nil
 }
 
 // UpsertImagePullSecret creates (or recreates) a docker-registry secret used to

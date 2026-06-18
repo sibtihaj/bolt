@@ -3,12 +3,14 @@ package infra
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	awsinfra "github.com/sibtihaj/bolt/app/infra/aws"
 	azureinfra "github.com/sibtihaj/bolt/app/infra/azure"
 	gcpinfra "github.com/sibtihaj/bolt/app/infra/gcp"
 	k8sinfra "github.com/sibtihaj/bolt/app/infra/k8s"
+	localinfra "github.com/sibtihaj/bolt/app/infra/local"
 	"github.com/sibtihaj/bolt/app/preflight"
 	"github.com/sibtihaj/bolt/app/state"
 )
@@ -28,8 +30,11 @@ type DestroyConfig struct {
 	// GCP credentials — only ServiceAcctJSON needed for token
 	GCP *GCPCreds
 
+	// Local — sub-type and SSH config for kind/kubeadm teardown
+	Local *LocalCreds
+
 	// Namespace + kubeconfig for in-cluster Postgres deletion (optional)
-	K8sNamespace  string
+	K8sNamespace   string
 	KubeconfigPath string
 }
 
@@ -46,6 +51,8 @@ func Destroy(ctx context.Context, cfg *DestroyConfig, infraState *state.InfraSta
 		return destroyAzure(ctx, cfg, infraState)
 	case "gcp":
 		return destroyGCP(ctx, cfg, infraState)
+	case "local":
+		return destroyLocal(cfg, infraState)
 	}
 	return fmt.Errorf("unknown cloud provider in state: %q", infraState.Cloud)
 }
@@ -241,6 +248,52 @@ func destroyGCP(ctx context.Context, cfg *DestroyConfig, st *state.InfraState) e
 			errs = append(errs, fmt.Errorf("GKE cluster %s: %w", st.GKEClusterCreated, err))
 		} else {
 			done("GKE cluster deleted")
+		}
+	}
+
+	return joinErrors(errs)
+}
+
+// ── Local ─────────────────────────────────────────────────────────────────────
+
+func destroyLocal(cfg *DestroyConfig, st *state.InfraState) error {
+	var errs []error
+
+	// 1. In-cluster PostgreSQL (must go before the cluster is deleted).
+	if st.DatabaseChoice == state.DBInCluster && cfg.KubeconfigPath != "" {
+		step("Removing in-cluster PostgreSQL…")
+		if err := k8sinfra.DeleteInClusterPostgres(cfg.K8sNamespace, cfg.KubeconfigPath); err != nil {
+			errs = append(errs, fmt.Errorf("in-cluster postgres: %w", err))
+		} else {
+			done("In-cluster PostgreSQL removed")
+		}
+	}
+
+	// 2. Delete the cluster itself.
+	if cfg.Local == nil {
+		return joinErrors(errs)
+	}
+	switch cfg.Local.SubType {
+	case LocalKind:
+		if st.KindClusterName != "" {
+			step("Deleting kind cluster " + st.KindClusterName + "…")
+			namePrefix := strings.TrimPrefix(st.KindClusterName, "bolt-")
+			if err := localinfra.DeleteKindCluster(namePrefix); err != nil {
+				errs = append(errs, fmt.Errorf("kind cluster: %w", err))
+			} else {
+				done("kind cluster deleted")
+			}
+		}
+	case LocalKubeadm:
+		step("Resetting kubeadm cluster on " + cfg.Local.SSHHost + "…")
+		if err := localinfra.DeleteKubeadmCluster(localinfra.SSHConfig{
+			Host:    cfg.Local.SSHHost,
+			User:    cfg.Local.SSHUser,
+			KeyPath: cfg.Local.SSHKeyPath,
+		}); err != nil {
+			errs = append(errs, fmt.Errorf("kubeadm reset: %w", err))
+		} else {
+			done("kubeadm cluster reset")
 		}
 	}
 

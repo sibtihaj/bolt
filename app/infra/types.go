@@ -22,7 +22,25 @@ const (
 	CloudAzure  CloudProvider = "azure"
 	CloudGCP    CloudProvider = "gcp"
 	CloudDocker CloudProvider = "docker"
+	CloudLocal  CloudProvider = "local"
 )
+
+// LocalSubType distinguishes between the two local cluster backends.
+type LocalSubType string
+
+const (
+	LocalKind    LocalSubType = "kind"
+	LocalKubeadm LocalSubType = "kubeadm"
+)
+
+// LocalCreds holds connection details for local cluster provisioning.
+// Never persisted to disk — SSH key paths are referenced by path only.
+type LocalCreds struct {
+	SubType    LocalSubType
+	SSHHost    string // kubeadm only
+	SSHUser    string // kubeadm only — default "root"
+	SSHKeyPath string // kubeadm only — default ~/.ssh/id_rsa
+}
 
 // ResourceTier sets the pre-defined sizing profile for all provisioned resources.
 type ResourceTier string
@@ -130,6 +148,7 @@ type InfraConfig struct {
 	AWS   *AWSCreds
 	Azure *AzureCreds
 	GCP   *GCPCreds
+	Local *LocalCreds
 
 	// NamePrefix is prepended to every cloud resource bolt creates.
 	NamePrefix string

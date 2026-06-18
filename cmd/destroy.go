@@ -79,6 +79,23 @@ func handleInfraDestroy(d *state.TFEDeployment) error {
 		return err
 	}
 
+	// For local clusters, reconstruct LocalCreds from saved deployment fields
+	// (SSH details live on TFEDeployment, not InfraState).
+	if st.Cloud == "local" {
+		subType := infra.LocalKind
+		if d.ClusterType == "kubeadm" {
+			subType = infra.LocalKubeadm
+		}
+		cfg.Local = &infra.LocalCreds{
+			SubType:    subType,
+			SSHHost:    d.SSHHost,
+			SSHUser:    d.SSHUser,
+			SSHKeyPath: d.SSHKeyPath,
+		}
+		cfg.KubeconfigPath = d.Kubeconfig
+		cfg.K8sNamespace = d.Namespace
+	}
+
 	fmt.Println()
 	fmt.Println(lipgloss.NewStyle().Foreground(cyanBright).Render("  Tearing down cloud infrastructure…"))
 	return infra.Destroy(context.Background(), cfg, st)
@@ -155,6 +172,9 @@ func collectDestroyCredentials(st *state.InfraState) (*infra.DestroyConfig, erro
 			Zone:            gcpCfg.Zone,
 			ServiceAcctJSON: gcpCfg.ServiceAcctJSON,
 		}
+
+	case "local":
+		// No credentials to collect — LocalCreds is set by handleInfraDestroy from saved deployment state.
 
 	default:
 		return nil, fmt.Errorf("unknown cloud provider %q in state", st.Cloud)

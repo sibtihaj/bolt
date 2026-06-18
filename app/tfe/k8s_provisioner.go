@@ -59,6 +59,10 @@ func (p *K8sProvisioner) Deploy(creds *credentials.TFECredentials) error {
 		return fmt.Errorf("create TLS secret: %w", err)
 	}
 
+	fmt.Println("→ Verifying container registry credentials…")
+	if err := kubectl.ValidateRegistryCredentials(creds.RegistryUsername, creds.RegistryPassword); err != nil {
+		return err
+	}
 	if err := kubectl.UpsertImagePullSecret(d, "tfe-image-pull", creds.RegistryUsername, creds.RegistryPassword); err != nil {
 		return fmt.Errorf("create image pull secret: %w", err)
 	}

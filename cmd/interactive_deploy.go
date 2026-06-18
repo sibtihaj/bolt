@@ -361,6 +361,15 @@ func interactiveDeployK8s() error {
 		d.StorageConfig = &state.StorageConfig{S3Bucket: s3Bucket, S3Region: s3Region}
 	}
 
+	registryUsername := os.Getenv("TFE_REGISTRY_USERNAME")
+	if registryUsername == "" {
+		registryUsername = "terraform"
+	}
+	registryPassword := os.Getenv("TFE_REGISTRY_PASSWORD")
+	if registryPassword == "" {
+		registryPassword = license
+	}
+
 	creds := &credentials.TFECredentials{
 		License:            license,
 		EncryptionPassword: encryptionPassword,
@@ -372,6 +381,8 @@ func interactiveDeployK8s() error {
 		S3AccessKeyID:      s3AccessKeyID,
 		S3SecretAccessKey:  s3SecretAccessKey,
 		RedisURL:           redisURL,
+		RegistryUsername:   registryUsername,
+		RegistryPassword:   registryPassword,
 	}
 
 	// ── Phase 2+ : provision infrastructure if bolt is managing it ────────────
@@ -573,11 +584,18 @@ func deployHint(err error) string {
 			"    kubectl describe pod -n tfe <pod-name>\n" +
 			"    kubectl logs -n tfe -l app.kubernetes.io/name=terraform-enterprise"
 
+	case strings.Contains(msg, "image pull secret") || strings.Contains(msg, "tfe-image-pull"):
+		return "Registry credential error. Set your container registry credentials and retry:\n" +
+			"    export TFE_REGISTRY_USERNAME=terraform\n" +
+			"    export TFE_REGISTRY_PASSWORD=<your-TFE-license-key>\n" +
+			"    Then verify with: docker login images.releases.hashicorp.com"
+
 	case strings.Contains(msg, "ImagePull") || strings.Contains(msg, "ErrImagePull") ||
-		strings.Contains(msg, "image"):
-		return "Cannot pull the TFE container image. Verify:\n" +
-			"    1. The image tag is correct (check https://releases.hashicorp.com/terraform-enterprise).\n" +
-			"    2. Your cluster nodes can reach images.releases.hashicorp.com."
+		strings.Contains(msg, "unauthorized") && strings.Contains(msg, "image"):
+		return "Cannot pull the TFE container image — registry authentication may have failed. Check:\n" +
+			"    1. Set TFE_REGISTRY_USERNAME=terraform and TFE_REGISTRY_PASSWORD=<license> then retry.\n" +
+			"    2. The image tag is correct (check https://releases.hashicorp.com/terraform-enterprise).\n" +
+			"    3. Your cluster nodes can reach images.releases.hashicorp.com."
 
 	case strings.Contains(msg, "Forbidden") || strings.Contains(msg, "forbidden"):
 		return "Permission denied. Ensure the credentials you provided have the required RBAC\n" +
@@ -912,17 +930,28 @@ func interactiveDeployDocker() error {
 		d.StorageConfig = &state.StorageConfig{S3Bucket: s3Bucket, S3Region: s3Region}
 	}
 
+	dockerRegistryUsername := os.Getenv("TFE_REGISTRY_USERNAME")
+	if dockerRegistryUsername == "" {
+		dockerRegistryUsername = "terraform"
+	}
+	dockerRegistryPassword := os.Getenv("TFE_REGISTRY_PASSWORD")
+	if dockerRegistryPassword == "" {
+		dockerRegistryPassword = license
+	}
+
 	creds := &credentials.TFECredentials{
-		License:           license,
+		License:            license,
 		EncryptionPassword: encryptionPassword,
-		TLSCert:           tlsCertPath,
-		TLSKey:            tlsKeyPath,
-		DatabaseURL:       databaseURL,
-		S3Bucket:          s3Bucket,
-		S3Region:          s3Region,
-		S3AccessKeyID:     s3AccessKeyID,
-		S3SecretAccessKey: s3SecretAccessKey,
-		RedisURL:          redisURL,
+		TLSCert:            tlsCertPath,
+		TLSKey:             tlsKeyPath,
+		DatabaseURL:        databaseURL,
+		S3Bucket:           s3Bucket,
+		S3Region:           s3Region,
+		S3AccessKeyID:      s3AccessKeyID,
+		S3SecretAccessKey:  s3SecretAccessKey,
+		RedisURL:           redisURL,
+		RegistryUsername:   dockerRegistryUsername,
+		RegistryPassword:   dockerRegistryPassword,
 	}
 
 	p, err := tfe.NewProvisioner(d)

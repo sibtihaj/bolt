@@ -430,7 +430,7 @@ func provisionLocal(ctx context.Context, cfg *InfraConfig, infraState *state.Inf
 	case LocalKind:
 		globalSpinner.stop()
 		fmt.Printf("  ⋯  Provisioning kind cluster (bolt-%s)…\n", cfg.NamePrefix)
-		kubeconfigPath, err = localinfra.EnsureKindCluster(cfg.NamePrefix)
+		kubeconfigPath, err = localinfra.EnsureKindCluster(cfg.NamePrefix, true)
 		if err != nil {
 			return nil, fmt.Errorf("kind cluster: %w", err)
 		}
